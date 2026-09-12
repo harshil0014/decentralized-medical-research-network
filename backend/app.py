@@ -497,3 +497,8 @@ def download_dataset(request_id: str):
             "X-IPFS-CID": cid,
         },
     )
+
+
+# Microsoft SEAL homomorphic-encryption API
+from backend.he_api import router as he_router
+app.include_router(he_router)
