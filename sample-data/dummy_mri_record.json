@@ -1,0 +1,9 @@
+{
+  "datasetId": "MRI-DEMO-001",
+  "cid": "bafy-demo-not-a-real-ipfs-cid",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "ownerOrg": "HospitalA",
+  "dataType": "MRI_DICOM",
+  "metadataSummary": "Synthetic brain MRI; no PHI; prototype only",
+  "consentState": "ACTIVE"
+}

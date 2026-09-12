@@ -1,0 +1,23 @@
+# Python
+backend/.venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Generated DICOM test data
+demo_dicom/
+
+# Temporary/runtime files
+*.log
+*.tmp
+nohup.out
+
+# Backup files created during development
+backend/app.py.before_*
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
