@@ -21,3 +21,7 @@ backend/app.py.before_*
 Thumbs.db
 .vscode/
 .idea/
+
+# Build/generated HE files
+seal_demo/build/
+seal_demo/artifacts/
