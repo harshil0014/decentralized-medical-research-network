@@ -12,8 +12,41 @@ add_executable(
     main.cpp
 )
 
+add_executable(
+    hospital_encrypt
+    separated/hospital_encrypt.cpp
+)
+
+add_executable(
+    researcher_compute
+    separated/researcher_compute.cpp
+)
+
+add_executable(
+    hospital_decrypt
+    separated/hospital_decrypt.cpp
+)
+
 target_link_libraries(
     medical_he_demo
+    PRIVATE
+    SEAL::seal
+)
+
+target_link_libraries(
+    hospital_encrypt
+    PRIVATE
+    SEAL::seal
+)
+
+target_link_libraries(
+    researcher_compute
+    PRIVATE
+    SEAL::seal
+)
+
+target_link_libraries(
+    hospital_decrypt
     PRIVATE
     SEAL::seal
 )

@@ -25,3 +25,7 @@ Thumbs.db
 # Build/generated HE files
 seal_demo/build/
 seal_demo/artifacts/
+
+# Microsoft SEAL private/runtime material
+seal_demo/hospital_private/
+seal_demo/research_exchange/
