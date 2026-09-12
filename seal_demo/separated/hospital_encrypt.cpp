@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -68,11 +69,46 @@ int main()
 
     double scale = pow(2.0, 40);
 
-    vector<double> glucose = {
-        92.5,
-        105.2,
-        110.3
-    };
+    vector<double> glucose;
+
+    {
+        ifstream input("sample_input/glucose_values.csv");
+
+        if (!input)
+        {
+            cerr << "Cannot open medical input file\n";
+            return 1;
+        }
+
+        string line;
+
+        while (getline(input, line))
+        {
+            if (line.empty())
+                continue;
+
+            try
+            {
+                glucose.push_back(stod(line));
+            }
+            catch (...)
+            {
+                cerr << "Invalid numeric medical value: "
+                     << line << "\n";
+                return 1;
+            }
+        }
+    }
+
+    if (glucose.empty())
+    {
+        cerr << "No medical values found\n";
+        return 1;
+    }
+
+    cout << "Loaded "
+         << glucose.size()
+         << " medical values from CSV.\n";
 
     cout << "Plaintext values available ONLY on hospital side:\n";
 

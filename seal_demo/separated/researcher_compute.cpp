@@ -1,13 +1,17 @@
 #include <seal/seal.h>
 
+#include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <regex>
 #include <string>
 #include <vector>
 
 using namespace std;
 using namespace seal;
+namespace fs = std::filesystem;
 
 int main()
 {
@@ -16,10 +20,7 @@ int main()
     EncryptionParameters parms;
 
     {
-        ifstream in(
-            "research_exchange/parms.seal",
-            ios::binary
-        );
+        ifstream in("research_exchange/parms.seal", ios::binary);
 
         if (!in)
         {
@@ -41,32 +42,62 @@ int main()
     Evaluator evaluator(context);
     CKKSEncoder encoder(context);
 
-    vector<Ciphertext> encrypted_values(3);
+    vector<fs::path> ciphertext_files;
+    regex patient_ciphertext("^glucose_[0-9]+\\.ct$");
 
-    for (size_t i = 0; i < encrypted_values.size(); i++)
+    for (const auto &entry : fs::directory_iterator("research_exchange"))
     {
-        string filename =
-            "research_exchange/glucose_" +
-            to_string(i + 1) +
-            ".ct";
+        if (!entry.is_regular_file())
+            continue;
 
-        ifstream in(filename, ios::binary);
+        string name = entry.path().filename().string();
+
+        if (regex_match(name, patient_ciphertext))
+        {
+            ciphertext_files.push_back(entry.path());
+        }
+    }
+
+    sort(
+        ciphertext_files.begin(),
+        ciphertext_files.end()
+    );
+
+    if (ciphertext_files.empty())
+    {
+        cerr << "No encrypted glucose measurements found\n";
+        return 1;
+    }
+
+    vector<Ciphertext> encrypted_values;
+
+    for (const auto &path : ciphertext_files)
+    {
+        ifstream in(path, ios::binary);
 
         if (!in)
         {
-            cerr << "Missing ciphertext: "
-                 << filename << "\n";
+            cerr << "Cannot open ciphertext: "
+                 << path << "\n";
             return 1;
         }
 
-        encrypted_values[i].load(context, in);
+        Ciphertext encrypted;
+        encrypted.load(context, in);
+
+        encrypted_values.push_back(
+            std::move(encrypted)
+        );
     }
 
-    cout << "Loaded 3 encrypted glucose measurements.\n";
+    cout << "Loaded "
+         << encrypted_values.size()
+         << " encrypted glucose measurements.\n";
+
     cout << "No plaintext glucose values loaded.\n";
     cout << "No secret key loaded.\n\n";
 
-    Ciphertext encrypted_sum = encrypted_values[0];
+    Ciphertext encrypted_sum = encrypted_values.front();
 
     for (size_t i = 1; i < encrypted_values.size(); i++)
     {
@@ -81,7 +112,7 @@ int main()
     Plaintext divisor;
 
     encoder.encode(
-        1.0 / 3.0,
+        1.0 / static_cast<double>(encrypted_values.size()),
         encrypted_sum.parms_id(),
         scale,
         divisor
@@ -106,9 +137,8 @@ int main()
     }
 
     cout << "Encrypted average computed.\n";
-    cout << "Result remains ciphertext.\n";
-
-    cout << "\nRESEARCHER HE COMPUTATION: PASS\n";
+    cout << "Result remains ciphertext.\n\n";
+    cout << "RESEARCHER HE COMPUTATION: PASS\n";
 
     return 0;
 }

@@ -81,8 +81,39 @@ int main()
         decoded
     );
 
+    vector<double> original_values;
+
+    {
+        ifstream input("sample_input/glucose_values.csv");
+        double value;
+
+        if (!input)
+        {
+            cerr << "Cannot open hospital validation input\n";
+            return 1;
+        }
+
+        while (input >> value)
+        {
+            original_values.push_back(value);
+        }
+    }
+
+    if (original_values.empty())
+    {
+        cerr << "No validation values found\n";
+        return 1;
+    }
+
+    double total = 0.0;
+
+    for (double value : original_values)
+    {
+        total += value;
+    }
+
     double expected =
-        (92.5 + 105.2 + 110.3) / 3.0;
+        total / static_cast<double>(original_values.size());
 
     double result = decoded[0];
 
