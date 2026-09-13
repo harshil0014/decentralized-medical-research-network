@@ -302,3 +302,76 @@ def decrypt_average(
         "unit": "mg/dL",
         "average": average,
     }
+
+
+def cleanup_he_job(job_id: str) -> None:
+    job = _job_dir(job_id)
+
+    shutil.rmtree(
+        job,
+        ignore_errors=True,
+    )
+
+
+def discard_encrypted_result(
+    job_id: str,
+) -> None:
+    job = _job_dir(job_id)
+
+    result = (
+        job
+        / "research_exchange"
+        / "glucose_average.ct"
+    )
+
+    if result.exists():
+        result.unlink()
+
+
+def get_ciphertext_manifest_sha256(
+    job_id: str,
+) -> str:
+    job = _job_dir(job_id)
+
+    if not job.exists():
+        raise FileNotFoundError(
+            "HE job not found"
+        )
+
+    exchange = (
+        job
+        / "research_exchange"
+    )
+
+    if not exchange.exists():
+        raise RuntimeError(
+            "Research exchange is missing"
+        )
+
+    return _ciphertext_manifest_hash(
+        exchange
+    )
+
+
+def get_encrypted_result_sha256(
+    job_id: str,
+) -> str:
+    job = _job_dir(job_id)
+
+    if not job.exists():
+        raise FileNotFoundError(
+            "HE job not found"
+        )
+
+    result = (
+        job
+        / "research_exchange"
+        / "glucose_average.ct"
+    )
+
+    if not result.exists():
+        raise FileNotFoundError(
+            "Encrypted HE result not found"
+        )
+
+    return _sha256_file(result)
