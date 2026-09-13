@@ -7,8 +7,15 @@ import subprocess
 import tempfile
 import uuid
 
-from fastapi import FastAPI, HTTPException, Response, UploadFile, File, Form
+from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, File, Form
 from pydantic import BaseModel
+
+from backend.api_auth import (
+    authenticated_role,
+    require_authenticated,
+    require_hospital,
+    require_researcher,
+)
 
 from backend.storage_crypto import (
     dataset_key_exists,
@@ -285,7 +292,20 @@ def health():
     }
 
 
-@app.post("/datasets/upload")
+@app.get("/auth/me")
+def auth_me(
+    role: str = Depends(
+        authenticated_role
+    ),
+):
+    return {
+        "authenticated": True,
+        "role": role,
+        "authMode": "service-token",
+    }
+
+
+@app.post("/datasets/upload", dependencies=[Depends(require_hospital)])
 def upload_dataset(
     dataset_id: str = Form(...),
     data_type: str | None = Form(None),
@@ -844,7 +864,7 @@ def upload_dataset(
             )
 
 
-@app.get("/datasets")
+@app.get("/datasets", dependencies=[Depends(require_authenticated)])
 def list_datasets():
     raw = query("GetAllDatasets", [], "org2")
     records = json.loads(raw)
@@ -877,7 +897,7 @@ def list_datasets():
     ]
 
 
-@app.get("/datasets/{dataset_id}/history")
+@app.get("/datasets/{dataset_id}/history", dependencies=[Depends(require_authenticated)])
 def get_dataset_history(dataset_id: str):
     raw = query("GetDatasetHistory", [dataset_id], "org2")
     history = json.loads(raw)
@@ -904,7 +924,7 @@ def get_dataset_history(dataset_id: str):
     return safe_history
 
 
-@app.get("/datasets/{dataset_id}")
+@app.get("/datasets/{dataset_id}", dependencies=[Depends(require_authenticated)])
 def get_dataset(dataset_id: str):
     raw = query(
         "DiscoverDataset",
@@ -914,7 +934,7 @@ def get_dataset(dataset_id: str):
     return json.loads(raw)
 
 
-@app.post("/datasets/{dataset_id}/consent")
+@app.post("/datasets/{dataset_id}/consent", dependencies=[Depends(require_hospital)])
 def update_dataset_consent(dataset_id: str, body: ConsentUpdateInput):
     invoke("UpdateConsent", [dataset_id, body.consent_state], "org1")
 
@@ -922,7 +942,7 @@ def update_dataset_consent(dataset_id: str, body: ConsentUpdateInput):
     return json.loads(raw)
 
 
-@app.post("/datasets/{dataset_id}/rotate-key")
+@app.post("/datasets/{dataset_id}/rotate-key", dependencies=[Depends(require_hospital)])
 def rotate_dataset_encryption_key(
     dataset_id: str,
 ):
@@ -1067,7 +1087,7 @@ def rotate_dataset_encryption_key(
     }
 
 
-@app.post("/requests")
+@app.post("/requests", dependencies=[Depends(require_researcher)])
 def create_request(body: AccessRequestInput):
     invoke(
         "RequestAccess",
@@ -1079,13 +1099,13 @@ def create_request(body: AccessRequestInput):
     return json.loads(raw)
 
 
-@app.get("/requests/{request_id}")
+@app.get("/requests/{request_id}", dependencies=[Depends(require_authenticated)])
 def get_request(request_id: str):
     raw = query("ReadAccessRequest", [request_id], "org2")
     return json.loads(raw)
 
 
-@app.post("/requests/{request_id}/approve")
+@app.post("/requests/{request_id}/approve", dependencies=[Depends(require_hospital)])
 def approve_request(request_id: str):
     invoke("DecideAccess", [request_id, "APPROVED"], "org1")
 
@@ -1093,7 +1113,7 @@ def approve_request(request_id: str):
     return json.loads(raw)
 
 
-@app.post("/requests/{request_id}/revoke")
+@app.post("/requests/{request_id}/revoke", dependencies=[Depends(require_hospital)])
 def revoke_request(request_id: str):
     invoke("DecideAccess", [request_id, "REVOKED"], "org1")
 
@@ -1101,7 +1121,7 @@ def revoke_request(request_id: str):
     return json.loads(raw)
 
 
-@app.get("/requests/{request_id}/download")
+@app.get("/requests/{request_id}/download", dependencies=[Depends(require_researcher)])
 def download_dataset(request_id: str):
     allowed = query(
         "CanAccess",

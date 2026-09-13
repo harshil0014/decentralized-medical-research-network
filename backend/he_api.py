@@ -2,10 +2,17 @@ import json
 
 from fastapi import (
     APIRouter,
+    Depends,
     HTTPException,
 )
 
 from pydantic import BaseModel
+
+from backend.api_auth import (
+    require_authenticated,
+    require_hospital,
+    require_researcher,
+)
 
 from backend.storage_crypto import (
     decrypt_bytes,
@@ -117,7 +124,7 @@ def _require_approved_access(
     return request
 
 
-@router.post("/encrypt")
+@router.post("/encrypt", dependencies=[Depends(require_hospital)])
 def encrypt_glucose_cohort(
     payload: GlucoseCohortInput,
 ):
@@ -314,7 +321,10 @@ def encrypt_glucose_cohort(
 
 
 @router.post(
-    "/{job_id}/compute-average"
+    "/{job_id}/compute-average",
+    dependencies=[
+        Depends(require_researcher)
+    ],
 )
 def compute_average(
     job_id: str,
@@ -484,7 +494,10 @@ def compute_average(
 
 
 @router.post(
-    "/{job_id}/decrypt-average"
+    "/{job_id}/decrypt-average",
+    dependencies=[
+        Depends(require_hospital)
+    ],
 )
 def decrypt_he_average(
     job_id: str,
@@ -609,7 +622,10 @@ def decrypt_he_average(
 
 
 @router.get(
-    "/{job_id}/ledger"
+    "/{job_id}/ledger",
+    dependencies=[
+        Depends(require_authenticated)
+    ],
 )
 def read_he_ledger(
     job_id: str,
@@ -622,7 +638,10 @@ def read_he_ledger(
 
 
 @router.get(
-    "/{job_id}/history"
+    "/{job_id}/history",
+    dependencies=[
+        Depends(require_authenticated)
+    ],
 )
 def read_he_history(
     job_id: str,
