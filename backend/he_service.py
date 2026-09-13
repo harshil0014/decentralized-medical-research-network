@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import math
 import re
 import shutil
@@ -375,3 +377,129 @@ def get_encrypted_result_sha256(
         )
 
     return _sha256_file(result)
+
+
+def fetch_ipfs_dataset_bytes(
+    cid: str,
+) -> bytes:
+    if not cid or not cid.strip():
+        raise ValueError("Dataset CID is required")
+
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "medical-ipfs",
+            "ipfs",
+            "cat",
+            cid,
+        ],
+        capture_output=True,
+        timeout=60,
+    )
+
+    if result.returncode != 0:
+        message = (
+            result.stderr.decode(
+                "utf-8",
+                errors="replace",
+            ).strip()
+            or "IPFS retrieval failed"
+        )
+
+        raise RuntimeError(message)
+
+    return result.stdout
+
+
+def verify_dataset_bytes(
+    data: bytes,
+    expected_sha256: str,
+) -> str:
+    actual = hashlib.sha256(data).hexdigest()
+
+    if actual.lower() != expected_sha256.lower():
+        raise RuntimeError(
+            "Dataset integrity verification failed"
+        )
+
+    return actual
+
+
+def extract_numeric_metric_from_csv(
+    data: bytes,
+    metric: str,
+) -> list[float]:
+    if not metric or not metric.strip():
+        raise ValueError("Metric is required")
+
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "Dataset must be a UTF-8 CSV file"
+        ) from exc
+
+    reader = csv.DictReader(
+        io.StringIO(text)
+    )
+
+    if not reader.fieldnames:
+        raise ValueError(
+            "CSV dataset has no header"
+        )
+
+    normalized = {
+        name.strip(): name
+        for name in reader.fieldnames
+        if name is not None
+    }
+
+    if metric not in normalized:
+        raise ValueError(
+            f"Metric column '{metric}' not found in dataset"
+        )
+
+    original_column = normalized[metric]
+
+    values: list[float] = []
+
+    for row_number, row in enumerate(
+        reader,
+        start=2,
+    ):
+        raw = row.get(original_column)
+
+        if raw is None:
+            continue
+
+        raw = raw.strip()
+
+        if raw == "":
+            continue
+
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid numeric value in row {row_number}"
+            ) from exc
+
+        if not math.isfinite(value):
+            raise ValueError(
+                f"Non-finite value in row {row_number}"
+            )
+
+        values.append(value)
+
+    if len(values) < 2:
+        raise ValueError(
+            "Metric must contain at least 2 numeric values"
+        )
+
+    if len(values) > 1000:
+        raise ValueError(
+            "Metric contains more than 1000 values"
+        )
+
+    return values

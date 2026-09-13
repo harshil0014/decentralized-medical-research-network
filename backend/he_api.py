@@ -1,5 +1,4 @@
 import json
-import math
 
 from fastapi import (
     APIRouter,
@@ -14,8 +13,11 @@ from backend.he_service import (
     create_encrypted_glucose_cohort,
     decrypt_average,
     discard_encrypted_result,
+    extract_numeric_metric_from_csv,
+    fetch_ipfs_dataset_bytes,
     get_ciphertext_manifest_sha256,
     get_encrypted_result_sha256,
+    verify_dataset_bytes,
 )
 
 
@@ -28,7 +30,7 @@ router = APIRouter(
 class GlucoseCohortInput(BaseModel):
     dataset_id: str
     request_id: str
-    values: list[float]
+    metric: str = "fasting_glucose"
 
 
 def _fabric_invoke(
@@ -111,25 +113,63 @@ def encrypt_glucose_cohort(
     payload: GlucoseCohortInput,
 ):
     try:
-        if any(
-            not math.isfinite(float(v))
-            for v in payload.values
-        ):
-            raise ValueError(
-                "All values must be finite"
-            )
-
-        # Avoid creating ciphertext at all unless
-        # Fabric currently authorizes this request.
+        # First enforce the existing Fabric research policy.
         _require_approved_access(
             payload.dataset_id,
             payload.request_id,
         )
 
-        result = (
-            create_encrypted_glucose_cohort(
-                payload.values
+        # Dataset metadata comes from Fabric, not the client.
+        dataset = _fabric_query(
+            "ReadDataset",
+            [payload.dataset_id],
+            "org1",
+        )
+
+        if dataset.get("consentState") != "ACTIVE":
+            raise HTTPException(
+                status_code=403,
+                detail="Dataset consent is not active",
             )
+
+        data_type = (
+            dataset.get("dataType")
+            or ""
+        ).upper()
+
+        if data_type not in {
+            "LAB_CSV",
+            "NUMERIC_CSV",
+            "CSV",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "HE numeric extraction currently supports "
+                    "LAB_CSV, NUMERIC_CSV or CSV datasets only"
+                ),
+            )
+
+        # Retrieve the actual registered dataset from IPFS.
+        dataset_bytes = fetch_ipfs_dataset_bytes(
+            dataset["cid"]
+        )
+
+        # Verify the bytes against the immutable Fabric hash
+        # BEFORE extracting any medical values.
+        verified_sha256 = verify_dataset_bytes(
+            dataset_bytes,
+            dataset["sha256"],
+        )
+
+        values = extract_numeric_metric_from_csv(
+            dataset_bytes,
+            payload.metric,
+        )
+
+        # Only now do the real hospital-side SEAL encryption.
+        result = create_encrypted_glucose_cohort(
+            values
         )
 
         try:
@@ -139,7 +179,7 @@ def encrypt_glucose_cohort(
                     result["job_id"],
                     payload.dataset_id,
                     payload.request_id,
-                    "fasting_glucose",
+                    payload.metric,
                     str(result["count"]),
                     result[
                         "ciphertext_manifest_sha256"
@@ -149,8 +189,6 @@ def encrypt_glucose_cohort(
             )
 
         except Exception:
-            # Do not leave an orphan secret key /
-            # ciphertext job if ledger registration fails.
             cleanup_he_job(
                 result["job_id"]
             )
@@ -169,6 +207,13 @@ def encrypt_glucose_cohort(
         result["request_id"] = (
             payload.request_id
         )
+
+        result["metric"] = (
+            payload.metric
+        )
+
+        result["dataset_sha256_verified"] = True
+        result["dataset_sha256"] = verified_sha256
 
         result["fabric_status"] = (
             ledger["status"]
@@ -193,11 +238,17 @@ def encrypt_glucose_cohort(
             detail=str(exc),
         ) from exc
 
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail=(
-                f"Homomorphic encryption failed: {exc}"
+                f"Dataset-bound HE encryption failed: {exc}"
             ),
         ) from exc
 
