@@ -59,6 +59,27 @@ def _key_path(
     return _key_root() / f"{name}.key"
 
 
+def dataset_key_exists(
+    dataset_id: str,
+) -> bool:
+    return _key_path(
+        dataset_id
+    ).exists()
+
+
+def delete_dataset_key(
+    dataset_id: str,
+) -> None:
+    path = _key_path(
+        dataset_id
+    )
+
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def get_or_create_dataset_key(
     dataset_id: str,
 ) -> bytes:

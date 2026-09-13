@@ -11,7 +11,9 @@ from pydantic import BaseModel
 
 from backend.storage_crypto import (
     MAGIC,
+    dataset_key_exists,
     decrypt_bytes,
+    delete_dataset_key,
     encrypt_file,
     sha256_bytes,
 )
@@ -193,6 +195,9 @@ def upload_dataset(
     temp_path = None
     encrypted_path = None
     container_path = None
+    cid = None
+    key_existed_before = None
+    fabric_registered = False
 
     try:
         suffix = Path(file.filename or "upload.bin").suffix
@@ -298,6 +303,12 @@ def upload_dataset(
         # before it ever enters IPFS.
         encrypted_path = f"{temp_path}.medaes"
 
+        # Record whether this dataset already had a hospital key.
+        # On rollback we only delete keys created by THIS upload.
+        key_existed_before = dataset_key_exists(
+            dataset_id
+        )
+
         digest = encrypt_file(
             dataset_id,
             Path(temp_path),
@@ -360,6 +371,11 @@ def upload_dataset(
             "org1",
         )
 
+        # From this point onward the dataset is committed.
+        # Do NOT roll back its key or IPFS pin if a later
+        # response/query step fails.
+        fabric_registered = True
+
         raw = query("ReadDataset", [dataset_id], "org1")
         record = json.loads(raw)
 
@@ -368,6 +384,31 @@ def upload_dataset(
         return record
 
     finally:
+        # Transactional rollback:
+        # if Fabric registration never succeeded, the upload
+        # must not leave durable encrypted storage or a newly
+        # created hospital AES key behind.
+        if not fabric_registered:
+            if cid:
+                subprocess.run(
+                    [
+                        "docker",
+                        "exec",
+                        "medical-ipfs",
+                        "ipfs",
+                        "pin",
+                        "rm",
+                        cid,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+
+            if key_existed_before is False:
+                delete_dataset_key(
+                    dataset_id
+                )
+
         if temp_path:
             try:
                 os.unlink(temp_path)
