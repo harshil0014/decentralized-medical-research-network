@@ -9,6 +9,13 @@ import uuid
 from fastapi import FastAPI, HTTPException, Response, UploadFile, File, Form
 from pydantic import BaseModel
 
+from backend.storage_crypto import (
+    MAGIC,
+    decrypt_bytes,
+    encrypt_file,
+    sha256_bytes,
+)
+
 
 app = FastAPI(
     title="Medical Research Network Prototype",
@@ -184,6 +191,7 @@ def upload_dataset(
     file: UploadFile = File(...),
 ):
     temp_path = None
+    encrypted_path = None
     container_path = None
 
     try:
@@ -286,13 +294,25 @@ def upload_dataset(
                 detail="metadata_summary is required for non-DICOM uploads",
             )
 
-        container_path = f"/tmp/medical-upload-{uuid.uuid4().hex}{suffix}"
+        # Encrypt the final de-identified/validated medical object
+        # before it ever enters IPFS.
+        encrypted_path = f"{temp_path}.medaes"
+
+        digest = encrypt_file(
+            dataset_id,
+            Path(temp_path),
+            Path(encrypted_path),
+        )
+
+        container_path = (
+            f"/tmp/medical-upload-{uuid.uuid4().hex}.medaes"
+        )
 
         copied = subprocess.run(
             [
                 "docker",
                 "cp",
-                temp_path,
+                encrypted_path,
                 f"medical-ipfs:{container_path}",
             ],
             text=True,
@@ -344,12 +364,19 @@ def upload_dataset(
         record = json.loads(raw)
 
         record["uploadedFilename"] = file.filename
+        record["storageEncryption"] = "AES-256-GCM"
         return record
 
     finally:
         if temp_path:
             try:
                 os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+        if encrypted_path:
+            try:
+                os.unlink(encrypted_path)
             except FileNotFoundError:
                 pass
 
@@ -460,7 +487,11 @@ def revoke_request(request_id: str):
 
 @app.get("/requests/{request_id}/download")
 def download_dataset(request_id: str):
-    allowed = query("CanAccess", [request_id], "org2")
+    allowed = query(
+        "CanAccess",
+        [request_id],
+        "org2",
+    )
 
     if allowed != "true":
         raise HTTPException(
@@ -469,17 +500,32 @@ def download_dataset(request_id: str):
         )
 
     request_data = json.loads(
-        query("ReadAccessRequest", [request_id], "org2")
+        query(
+            "ReadAccessRequest",
+            [request_id],
+            "org2",
+        )
     )
 
     dataset_data = json.loads(
-        query("ReadDataset", [request_data["datasetId"]], "org2")
+        query(
+            "ReadDataset",
+            [request_data["datasetId"]],
+            "org2",
+        )
     )
 
     cid = dataset_data["cid"]
 
     result = subprocess.run(
-        ["docker", "exec", "medical-ipfs", "ipfs", "cat", cid],
+        [
+            "docker",
+            "exec",
+            "medical-ipfs",
+            "ipfs",
+            "cat",
+            cid,
+        ],
         capture_output=True,
     )
 
@@ -489,12 +535,62 @@ def download_dataset(request_id: str):
             detail="IPFS retrieval failed",
         )
 
+    stored_bytes = result.stdout
+
+    # Fabric stores the SHA-256 of the exact object placed in IPFS.
+    actual_sha256 = sha256_bytes(
+        stored_bytes
+    )
+
+    expected_sha256 = (
+        dataset_data["sha256"].lower()
+    )
+
+    if actual_sha256.lower() != expected_sha256:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "IPFS dataset integrity verification failed"
+            ),
+        )
+
+    if stored_bytes.startswith(MAGIC):
+        try:
+            content = decrypt_bytes(
+                dataset_data["datasetId"],
+                stored_bytes,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Hospital dataset encryption key is unavailable"
+                ),
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "AES-GCM dataset authentication failed"
+                ),
+            ) from exc
+
+        storage_encryption = "AES-256-GCM"
+
+    else:
+        # Backward compatibility only for datasets registered
+        # before encrypted-at-rest storage was introduced.
+        content = stored_bytes
+        storage_encryption = "LEGACY-PLAINTEXT"
+
     return Response(
-        content=result.stdout,
+        content=content,
         media_type="application/octet-stream",
         headers={
             "X-Dataset-ID": dataset_data["datasetId"],
             "X-IPFS-CID": cid,
+            "X-IPFS-SHA256-Verified": "true",
+            "X-Storage-Encryption": storage_encryption,
         },
     )
 

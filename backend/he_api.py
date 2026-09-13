@@ -7,6 +7,11 @@ from fastapi import (
 
 from pydantic import BaseModel
 
+from backend.storage_crypto import (
+    MAGIC,
+    decrypt_bytes,
+)
+
 from backend.he_service import (
     cleanup_he_job,
     compute_encrypted_average,
@@ -155,14 +160,35 @@ def encrypt_glucose_cohort(
                 ),
             )
 
-        dataset_bytes = fetch_ipfs_dataset_bytes(
+        stored_dataset_bytes = fetch_ipfs_dataset_bytes(
             dataset["cid"]
         )
 
+        # Verify the exact IPFS object against Fabric BEFORE
+        # attempting authenticated decryption.
         verified_sha256 = verify_dataset_bytes(
-            dataset_bytes,
+            stored_dataset_bytes,
             dataset["sha256"],
         )
+
+        if stored_dataset_bytes.startswith(MAGIC):
+            dataset_bytes = decrypt_bytes(
+                payload.dataset_id,
+                stored_dataset_bytes,
+            )
+
+            dataset_storage_encryption = (
+                "AES-256-GCM"
+            )
+
+        else:
+            # Compatibility with datasets created before
+            # AES encrypted-at-rest storage existed.
+            dataset_bytes = stored_dataset_bytes
+
+            dataset_storage_encryption = (
+                "LEGACY-PLAINTEXT"
+            )
 
         values = extract_numeric_metric_from_csv(
             dataset_bytes,
@@ -236,6 +262,10 @@ def encrypt_glucose_cohort(
 
         result["dataset_sha256_verified"] = True
         result["dataset_sha256"] = verified_sha256
+
+        result["dataset_storage_encryption"] = (
+            dataset_storage_encryption
+        )
 
         result["ciphertext_cid"] = (
             ciphertext_cid
