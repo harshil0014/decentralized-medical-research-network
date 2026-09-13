@@ -17,6 +17,11 @@ from backend.api_auth import (
     require_researcher,
 )
 
+from backend.runtime_security import (
+    SecurityHeadersMiddleware,
+    require_mutation_lock,
+)
+
 from backend.storage_crypto import (
     dataset_key_exists,
     decrypt_bytes,
@@ -33,6 +38,13 @@ from backend.storage_crypto import (
 app = FastAPI(
     title="Medical Research Network Prototype",
     version="0.1.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+app.add_middleware(
+    SecurityHeadersMiddleware
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -305,7 +317,7 @@ def auth_me(
     }
 
 
-@app.post("/datasets/upload", dependencies=[Depends(require_hospital)])
+@app.post("/datasets/upload", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
 def upload_dataset(
     dataset_id: str = Form(...),
     data_type: str | None = Form(None),
@@ -934,7 +946,7 @@ def get_dataset(dataset_id: str):
     return json.loads(raw)
 
 
-@app.post("/datasets/{dataset_id}/consent", dependencies=[Depends(require_hospital)])
+@app.post("/datasets/{dataset_id}/consent", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
 def update_dataset_consent(dataset_id: str, body: ConsentUpdateInput):
     invoke("UpdateConsent", [dataset_id, body.consent_state], "org1")
 
@@ -942,7 +954,7 @@ def update_dataset_consent(dataset_id: str, body: ConsentUpdateInput):
     return json.loads(raw)
 
 
-@app.post("/datasets/{dataset_id}/rotate-key", dependencies=[Depends(require_hospital)])
+@app.post("/datasets/{dataset_id}/rotate-key", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
 def rotate_dataset_encryption_key(
     dataset_id: str,
 ):
@@ -1087,7 +1099,7 @@ def rotate_dataset_encryption_key(
     }
 
 
-@app.post("/requests", dependencies=[Depends(require_researcher)])
+@app.post("/requests", dependencies=[Depends(require_researcher), Depends(require_mutation_lock)])
 def create_request(body: AccessRequestInput):
     invoke(
         "RequestAccess",
@@ -1105,7 +1117,7 @@ def get_request(request_id: str):
     return json.loads(raw)
 
 
-@app.post("/requests/{request_id}/approve", dependencies=[Depends(require_hospital)])
+@app.post("/requests/{request_id}/approve", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
 def approve_request(request_id: str):
     invoke("DecideAccess", [request_id, "APPROVED"], "org1")
 
@@ -1113,7 +1125,7 @@ def approve_request(request_id: str):
     return json.loads(raw)
 
 
-@app.post("/requests/{request_id}/revoke", dependencies=[Depends(require_hospital)])
+@app.post("/requests/{request_id}/revoke", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
 def revoke_request(request_id: str):
     invoke("DecideAccess", [request_id, "REVOKED"], "org1")
 

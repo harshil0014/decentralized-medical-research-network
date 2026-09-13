@@ -14,6 +14,10 @@ from backend.api_auth import (
     require_researcher,
 )
 
+from backend.runtime_security import (
+    require_mutation_lock,
+)
+
 from backend.storage_crypto import (
     decrypt_bytes,
     is_encrypted_dataset,
@@ -124,7 +128,13 @@ def _require_approved_access(
     return request
 
 
-@router.post("/encrypt", dependencies=[Depends(require_hospital)])
+@router.post(
+    "/encrypt",
+    dependencies=[
+        Depends(require_hospital),
+        Depends(require_mutation_lock),
+    ],
+)
 def encrypt_glucose_cohort(
     payload: GlucoseCohortInput,
 ):
@@ -323,7 +333,8 @@ def encrypt_glucose_cohort(
 @router.post(
     "/{job_id}/compute-average",
     dependencies=[
-        Depends(require_researcher)
+        Depends(require_researcher),
+        Depends(require_mutation_lock),
     ],
 )
 def compute_average(
@@ -496,7 +507,8 @@ def compute_average(
 @router.post(
     "/{job_id}/decrypt-average",
     dependencies=[
-        Depends(require_hospital)
+        Depends(require_hospital),
+        Depends(require_mutation_lock),
     ],
 )
 def decrypt_he_average(
