@@ -1,14 +1,15 @@
 from __future__ import annotations
+import io
+import zipfile
 
 import csv
 import hashlib
-import io
 import math
 import re
 import shutil
 import subprocess
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -150,6 +151,13 @@ def create_encrypted_glucose_cohort(
     )
 
     _run(HOSPITAL_ENCRYPT, job)
+
+    # Plaintext staging is no longer needed after encryption.
+    # Keep only the hospital secret material and encrypted artifacts.
+    shutil.rmtree(
+        sample_dir,
+        ignore_errors=True,
+    )
 
     secret_key = (
         job
@@ -503,3 +511,410 @@ def extract_numeric_metric_from_csv(
         )
 
     return values
+
+
+
+def _ipfs_add_file(
+    path: Path,
+) -> str:
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(
+            f"IPFS source file not found: {path}"
+        )
+
+    container_path = (
+        f"/tmp/he-artifact-{uuid.uuid4().hex}"
+        f"{path.suffix}"
+    )
+
+    try:
+        copied = subprocess.run(
+            [
+                "docker",
+                "cp",
+                str(path),
+                f"medical-ipfs:{container_path}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        if copied.returncode != 0:
+            raise RuntimeError(
+                copied.stderr.strip()
+                or "Failed to copy HE artifact into IPFS node"
+            )
+
+        added = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "medical-ipfs",
+                "ipfs",
+                "add",
+                "-Q",
+                container_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        if added.returncode != 0:
+            raise RuntimeError(
+                added.stderr.strip()
+                or "IPFS add failed"
+            )
+
+        cid = added.stdout.strip()
+
+        if not cid:
+            raise RuntimeError(
+                "IPFS returned an empty CID"
+            )
+
+        return cid
+
+    finally:
+        subprocess.run(
+            [
+                "docker",
+                "exec",
+                "medical-ipfs",
+                "rm",
+                "-f",
+                container_path,
+            ],
+            capture_output=True,
+        )
+
+
+def _ipfs_cat_artifact(
+    cid: str,
+) -> bytes:
+    if not cid or not cid.strip():
+        raise ValueError("IPFS CID is required")
+
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "medical-ipfs",
+            "ipfs",
+            "cat",
+            cid,
+        ],
+        capture_output=True,
+        timeout=120,
+    )
+
+    if result.returncode != 0:
+        message = (
+            result.stderr.decode(
+                "utf-8",
+                errors="replace",
+            ).strip()
+            or "IPFS artifact retrieval failed"
+        )
+
+        raise RuntimeError(message)
+
+    return result.stdout
+
+
+def unpin_ipfs(
+    cid: str,
+) -> None:
+    if not cid:
+        return
+
+    subprocess.run(
+        [
+            "docker",
+            "exec",
+            "medical-ipfs",
+            "ipfs",
+            "pin",
+            "rm",
+            cid,
+        ],
+        capture_output=True,
+        timeout=60,
+    )
+
+
+def remove_research_exchange(
+    job_id: str,
+) -> None:
+    job = _job_dir(job_id)
+
+    shutil.rmtree(
+        job / "research_exchange",
+        ignore_errors=True,
+    )
+
+
+def publish_ciphertext_bundle_to_ipfs(
+    job_id: str,
+) -> str:
+    job = _job_dir(job_id)
+    exchange = job / "research_exchange"
+
+    if not exchange.exists():
+        raise FileNotFoundError(
+            "Research exchange is missing"
+        )
+
+    files = []
+
+    for path in sorted(exchange.rglob("*")):
+        if path.is_symlink():
+            raise RuntimeError(
+                "Symlinks are not allowed in HE exchange"
+            )
+
+        if not path.is_file():
+            continue
+
+        relative = path.relative_to(
+            exchange
+        ).as_posix()
+
+        if "secret" in relative.lower():
+            raise RuntimeError(
+                "Secret material detected in researcher exchange"
+            )
+
+        if path.name == "glucose_average.ct":
+            continue
+
+        files.append(path)
+
+    if not files:
+        raise RuntimeError(
+            "No HE researcher artifacts available to publish"
+        )
+
+    bundle = (
+        job
+        / f".{job_id}.ciphertext_bundle.zip"
+    )
+
+    try:
+        with zipfile.ZipFile(
+            bundle,
+            "w",
+            compression=zipfile.ZIP_STORED,
+        ) as archive:
+            for path in files:
+                archive.write(
+                    path,
+                    arcname=path.relative_to(
+                        exchange
+                    ).as_posix(),
+                )
+
+        return _ipfs_add_file(bundle)
+
+    finally:
+        try:
+            bundle.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def restore_ciphertext_bundle_from_ipfs(
+    job_id: str,
+    cid: str,
+    expected_manifest_sha256: str,
+) -> str:
+    job = _job_dir(job_id)
+
+    job.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    exchange = (
+        job
+        / "research_exchange"
+    )
+
+    shutil.rmtree(
+        exchange,
+        ignore_errors=True,
+    )
+
+    exchange.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    data = _ipfs_cat_artifact(cid)
+
+    # Prototype safety limit against oversized/bomb archives.
+    if len(data) > 512 * 1024 * 1024:
+        shutil.rmtree(
+            exchange,
+            ignore_errors=True,
+        )
+
+        raise RuntimeError(
+            "HE ciphertext bundle is too large"
+        )
+
+    try:
+        with zipfile.ZipFile(
+            io.BytesIO(data),
+            "r",
+        ) as archive:
+
+            infos = [
+                info
+                for info in archive.infolist()
+                if not info.is_dir()
+            ]
+
+            if not infos or len(infos) > 5000:
+                raise RuntimeError(
+                    "Invalid HE ciphertext bundle"
+                )
+
+            total_size = sum(
+                info.file_size
+                for info in infos
+            )
+
+            if total_size > 512 * 1024 * 1024:
+                raise RuntimeError(
+                    "HE ciphertext bundle expands too large"
+                )
+
+            for info in infos:
+                relative = PurePosixPath(
+                    info.filename
+                )
+
+                if (
+                    relative.is_absolute()
+                    or ".." in relative.parts
+                ):
+                    raise RuntimeError(
+                        "Unsafe HE bundle path"
+                    )
+
+                if "secret" in info.filename.lower():
+                    raise RuntimeError(
+                        "Secret material detected in HE bundle"
+                    )
+
+                target = exchange.joinpath(
+                    *relative.parts
+                )
+
+                target.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
+                with archive.open(
+                    info,
+                    "r",
+                ) as src:
+                    with target.open(
+                        "wb",
+                    ) as dst:
+                        shutil.copyfileobj(
+                            src,
+                            dst,
+                        )
+
+        actual_manifest = (
+            _ciphertext_manifest_hash(
+                exchange
+            )
+        )
+
+        if (
+            actual_manifest.lower()
+            != expected_manifest_sha256.lower()
+        ):
+            raise RuntimeError(
+                "Ciphertext manifest does not match Fabric"
+            )
+
+        return actual_manifest
+
+    except Exception:
+        shutil.rmtree(
+            exchange,
+            ignore_errors=True,
+        )
+        raise
+
+
+def publish_encrypted_result_to_ipfs(
+    job_id: str,
+) -> dict:
+    job = _job_dir(job_id)
+
+    result = (
+        job
+        / "research_exchange"
+        / "glucose_average.ct"
+    )
+
+    if not result.exists():
+        raise FileNotFoundError(
+            "Encrypted HE result not found"
+        )
+
+    digest = _sha256_file(result)
+    cid = _ipfs_add_file(result)
+
+    return {
+        "cid": cid,
+        "sha256": digest,
+    }
+
+
+def restore_encrypted_result_from_ipfs(
+    job_id: str,
+    cid: str,
+    expected_sha256: str,
+) -> str:
+    job = _job_dir(job_id)
+
+    exchange = (
+        job
+        / "research_exchange"
+    )
+
+    exchange.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    data = _ipfs_cat_artifact(cid)
+
+    actual = hashlib.sha256(
+        data
+    ).hexdigest()
+
+    if (
+        actual.lower()
+        != expected_sha256.lower()
+    ):
+        raise RuntimeError(
+            "Encrypted result SHA256 does not match Fabric"
+        )
+
+    result = (
+        exchange
+        / "glucose_average.ct"
+    )
+
+    result.write_bytes(data)
+
+    return actual

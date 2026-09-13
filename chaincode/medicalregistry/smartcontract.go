@@ -404,7 +404,9 @@ type HEJobRecord struct {
 	RequestID                string `json:"requestId"`
 	Metric                   string `json:"metric"`
 	CohortSize               int    `json:"cohortSize"`
+	CiphertextCID            string `json:"ciphertextCid"`
 	CiphertextManifestSHA256 string `json:"ciphertextManifestSha256"`
+	ResultCID                string `json:"resultCid"`
 	ResultSHA256             string `json:"resultSha256"`
 	OwnerOrg                 string `json:"ownerOrg"`
 	ResearcherOrg            string `json:"researcherOrg"`
@@ -427,6 +429,7 @@ func (s *SmartContract) RegisterHEJob(
 	requestID string,
 	metric string,
 	cohortSizeRaw string,
+	ciphertextCID string,
 	ciphertextManifestSHA256 string,
 ) error {
 
@@ -449,6 +452,10 @@ func (s *SmartContract) RegisterHEJob(
 	cohortSize, err := strconv.Atoi(cohortSizeRaw)
 	if err != nil || cohortSize < 1 {
 		return fmt.Errorf("cohortSize must be a positive integer")
+	}
+
+	if strings.TrimSpace(ciphertextCID) == "" {
+		return fmt.Errorf("ciphertext CID is required")
 	}
 
 	if !validation.ValidSHA256(ciphertextManifestSHA256) {
@@ -539,7 +546,9 @@ func (s *SmartContract) RegisterHEJob(
 		RequestID:                requestID,
 		Metric:                   metric,
 		CohortSize:               cohortSize,
+		CiphertextCID:            strings.TrimSpace(ciphertextCID),
 		CiphertextManifestSHA256: strings.ToLower(ciphertextManifestSHA256),
+		ResultCID:                "",
 		ResultSHA256:             "",
 		OwnerOrg:                 ds.OwnerOrg,
 		ResearcherOrg:            req.RequesterOrg,
@@ -595,8 +604,13 @@ func (s *SmartContract) ReadHEJob(
 func (s *SmartContract) RecordHEComputation(
 	ctx contractapi.TransactionContextInterface,
 	jobID string,
+	resultCID string,
 	resultSHA256 string,
 ) error {
+
+	if strings.TrimSpace(resultCID) == "" {
+		return fmt.Errorf("result CID is required")
+	}
 
 	if !validation.ValidSHA256(resultSHA256) {
 		return fmt.Errorf("result SHA256 must be a 64-character hex value")
@@ -650,6 +664,7 @@ func (s *SmartContract) RecordHEComputation(
 		return err
 	}
 
+	record.ResultCID = strings.TrimSpace(resultCID)
 	record.ResultSHA256 = strings.ToLower(resultSHA256)
 	record.ResearcherOrg = researcherOrg
 	record.Status = "COMPUTED"

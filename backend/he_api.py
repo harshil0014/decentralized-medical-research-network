@@ -15,8 +15,12 @@ from backend.he_service import (
     discard_encrypted_result,
     extract_numeric_metric_from_csv,
     fetch_ipfs_dataset_bytes,
-    get_ciphertext_manifest_sha256,
-    get_encrypted_result_sha256,
+    publish_ciphertext_bundle_to_ipfs,
+    publish_encrypted_result_to_ipfs,
+    remove_research_exchange,
+    restore_ciphertext_bundle_from_ipfs,
+    restore_encrypted_result_from_ipfs,
+    unpin_ipfs,
     verify_dataset_bytes,
 )
 
@@ -112,14 +116,15 @@ def _require_approved_access(
 def encrypt_glucose_cohort(
     payload: GlucoseCohortInput,
 ):
+    ciphertext_cid = None
+    job_id = None
+
     try:
-        # First enforce the existing Fabric research policy.
         _require_approved_access(
             payload.dataset_id,
             payload.request_id,
         )
 
-        # Dataset metadata comes from Fabric, not the client.
         dataset = _fabric_query(
             "ReadDataset",
             [payload.dataset_id],
@@ -150,13 +155,10 @@ def encrypt_glucose_cohort(
                 ),
             )
 
-        # Retrieve the actual registered dataset from IPFS.
         dataset_bytes = fetch_ipfs_dataset_bytes(
             dataset["cid"]
         )
 
-        # Verify the bytes against the immutable Fabric hash
-        # BEFORE extracting any medical values.
         verified_sha256 = verify_dataset_bytes(
             dataset_bytes,
             dataset["sha256"],
@@ -167,20 +169,30 @@ def encrypt_glucose_cohort(
             payload.metric,
         )
 
-        # Only now do the real hospital-side SEAL encryption.
         result = create_encrypted_glucose_cohort(
             values
+        )
+
+        job_id = result["job_id"]
+
+        # Only the researcher-safe encrypted exchange is published.
+        # hospital_private/secret.key is outside this bundle.
+        ciphertext_cid = (
+            publish_ciphertext_bundle_to_ipfs(
+                job_id
+            )
         )
 
         try:
             _fabric_invoke(
                 "RegisterHEJob",
                 [
-                    result["job_id"],
+                    job_id,
                     payload.dataset_id,
                     payload.request_id,
                     payload.metric,
                     str(result["count"]),
+                    ciphertext_cid,
                     result[
                         "ciphertext_manifest_sha256"
                     ],
@@ -189,15 +201,25 @@ def encrypt_glucose_cohort(
             )
 
         except Exception:
-            cleanup_he_job(
-                result["job_id"]
-            )
+            unpin_ipfs(ciphertext_cid)
+            cleanup_he_job(job_id)
             raise
 
         ledger = _fabric_query(
             "ReadHEJob",
-            [result["job_id"]],
+            [job_id],
             "org1",
+        )
+
+        if ledger.get("ciphertextCid") != ciphertext_cid:
+            raise RuntimeError(
+                "Fabric ciphertext CID verification failed"
+            )
+
+        # Prove that subsequent research computation must
+        # reconstruct its workspace from IPFS.
+        remove_research_exchange(
+            job_id
         )
 
         result["dataset_id"] = (
@@ -214,6 +236,14 @@ def encrypt_glucose_cohort(
 
         result["dataset_sha256_verified"] = True
         result["dataset_sha256"] = verified_sha256
+
+        result["ciphertext_cid"] = (
+            ciphertext_cid
+        )
+
+        result["ciphertext_storage"] = (
+            "IPFS"
+        )
 
         result["fabric_status"] = (
             ledger["status"]
@@ -248,7 +278,7 @@ def encrypt_glucose_cohort(
         raise HTTPException(
             status_code=500,
             detail=(
-                f"Dataset-bound HE encryption failed: {exc}"
+                f"IPFS-backed HE encryption failed: {exc}"
             ),
         ) from exc
 
@@ -259,6 +289,8 @@ def encrypt_glucose_cohort(
 def compute_average(
     job_id: str,
 ):
+    result_cid = None
+
     try:
         ledger = _fabric_query(
             "ReadHEJob",
@@ -266,55 +298,84 @@ def compute_average(
             "org2",
         )
 
+        if ledger.get("status") != "ENCRYPTED":
+            raise HTTPException(
+                status_code=409,
+                detail="HE job is not in ENCRYPTED state",
+            )
+
         _require_approved_access(
             ledger["datasetId"],
             ledger["requestId"],
         )
 
-        # Integrity check: the ciphertext set used
-        # by the researcher must still match the hash
-        # registered by the hospital on Fabric.
-        actual_manifest = (
-            get_ciphertext_manifest_sha256(
-                job_id
-            )
+        ciphertext_cid = ledger.get(
+            "ciphertextCid"
         )
 
-        if (
-            actual_manifest
-            != ledger["ciphertextManifestSha256"]
-        ):
+        if not ciphertext_cid:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Encrypted cohort integrity "
-                    "verification failed"
+                    "HE job has no IPFS ciphertext CID; "
+                    "it predates IPFS-backed HE storage"
                 ),
             )
 
-        result = (
-            compute_encrypted_average(
+        restored_manifest = (
+            restore_ciphertext_bundle_from_ipfs(
+                job_id,
+                ciphertext_cid,
+                ledger[
+                    "ciphertextManifestSha256"
+                ],
+            )
+        )
+
+        result = compute_encrypted_average(
+            job_id
+        )
+
+        published = (
+            publish_encrypted_result_to_ipfs(
                 job_id
             )
         )
+
+        result_cid = published["cid"]
+
+        if (
+            published["sha256"]
+            != result["result_sha256"]
+        ):
+            unpin_ipfs(result_cid)
+
+            raise RuntimeError(
+                "Encrypted result hash changed before IPFS publication"
+            )
 
         try:
             _fabric_invoke(
                 "RecordHEComputation",
                 [
                     job_id,
+                    result_cid,
                     result["result_sha256"],
                 ],
                 "org2",
             )
 
         except Exception:
-            # If access was revoked between our
-            # pre-check and the ledger transaction,
-            # discard the derived ciphertext.
+            unpin_ipfs(result_cid)
+
             discard_encrypted_result(
                 job_id
             )
+
+            remove_research_exchange(
+                job_id
+            )
+
             raise
 
         ledger = _fabric_query(
@@ -323,12 +384,39 @@ def compute_average(
             "org2",
         )
 
+        if ledger.get("resultCid") != result_cid:
+            raise RuntimeError(
+                "Fabric result CID verification failed"
+            )
+
+        # Researcher workspace is disposable.
+        # The durable encrypted artifacts now live in IPFS.
+        remove_research_exchange(
+            job_id
+        )
+
         result["dataset_id"] = (
             ledger["datasetId"]
         )
 
         result["request_id"] = (
             ledger["requestId"]
+        )
+
+        result["ciphertext_cid"] = (
+            ciphertext_cid
+        )
+
+        result["ciphertext_manifest_sha256"] = (
+            restored_manifest
+        )
+
+        result["result_cid"] = (
+            result_cid
+        )
+
+        result["result_storage"] = (
+            "IPFS"
         )
 
         result["fabric_status"] = (
@@ -344,15 +432,15 @@ def compute_average(
     except HTTPException:
         raise
 
-    except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        ) from exc
-
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
             detail=str(exc),
         ) from exc
 
@@ -360,7 +448,7 @@ def compute_average(
         raise HTTPException(
             status_code=500,
             detail=(
-                f"Encrypted computation failed: {exc}"
+                f"IPFS-backed HE computation failed: {exc}"
             ),
         ) from exc
 
@@ -368,7 +456,7 @@ def compute_average(
 @router.post(
     "/{job_id}/decrypt-average"
 )
-def decrypt_glucose_average(
+def decrypt_he_average(
     job_id: str,
 ):
     try:
@@ -378,34 +466,45 @@ def decrypt_glucose_average(
             "org1",
         )
 
-        if ledger["status"] != "COMPUTED":
+        if ledger.get("status") != "COMPUTED":
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    "HE job is not ready for decryption"
-                ),
+                detail="HE job is not in COMPUTED state",
             )
 
-        # Hospital verifies the encrypted result
-        # against the immutable Fabric hash before
-        # allowing decryption.
-        actual_result_hash = (
-            get_encrypted_result_sha256(
-                job_id
-            )
+        ciphertext_cid = ledger.get(
+            "ciphertextCid"
         )
 
-        if (
-            actual_result_hash
-            != ledger["resultSha256"]
-        ):
+        result_cid = ledger.get(
+            "resultCid"
+        )
+
+        if not ciphertext_cid or not result_cid:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Encrypted result integrity "
-                    "verification failed"
+                    "HE job does not contain IPFS-backed artifacts"
                 ),
             )
+
+        # Rebuild the non-secret SEAL context from IPFS.
+        restore_ciphertext_bundle_from_ipfs(
+            job_id,
+            ciphertext_cid,
+            ledger[
+                "ciphertextManifestSha256"
+            ],
+        )
+
+        # Fetch the encrypted aggregate independently from IPFS.
+        verified_result_sha256 = (
+            restore_encrypted_result_from_ipfs(
+                job_id,
+                result_cid,
+                ledger["resultSha256"],
+            )
+        )
 
         result = decrypt_average(
             job_id
@@ -423,12 +522,30 @@ def decrypt_glucose_average(
             "org1",
         )
 
+        # Leave the hospital secret key local,
+        # but discard all fetched researcher artifacts.
+        remove_research_exchange(
+            job_id
+        )
+
         result["dataset_id"] = (
             ledger["datasetId"]
         )
 
         result["request_id"] = (
             ledger["requestId"]
+        )
+
+        result["ciphertext_cid"] = (
+            ciphertext_cid
+        )
+
+        result["result_cid"] = (
+            result_cid
+        )
+
+        result["result_sha256_verified"] = (
+            verified_result_sha256
         )
 
         result["fabric_status"] = (
@@ -440,15 +557,15 @@ def decrypt_glucose_average(
     except HTTPException:
         raise
 
-    except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        ) from exc
-
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
             detail=str(exc),
         ) from exc
 
@@ -456,7 +573,7 @@ def decrypt_glucose_average(
         raise HTTPException(
             status_code=500,
             detail=(
-                f"HE result decryption failed: {exc}"
+                f"IPFS-backed HE decryption failed: {exc}"
             ),
         ) from exc
 
