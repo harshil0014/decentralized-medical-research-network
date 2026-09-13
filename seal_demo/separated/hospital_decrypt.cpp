@@ -120,7 +120,7 @@ int main()
     double error =
         abs(result - expected);
 
-    cout << fixed << setprecision(6);
+    cout << fixed << setprecision(12);
 
     cout << "Expected average:  "
          << expected
