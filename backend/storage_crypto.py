@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers import (
@@ -59,6 +61,186 @@ def _key_path(
     return _key_root() / f"{name}.key"
 
 
+def _key_metadata_path(
+    dataset_id: str,
+) -> Path:
+    return _key_path(
+        dataset_id
+    ).with_suffix(".json")
+
+
+def _utc_now() -> str:
+    return (
+        datetime.now(
+            timezone.utc
+        )
+        .replace(
+            microsecond=0
+        )
+        .isoformat()
+        .replace(
+            "+00:00",
+            "Z",
+        )
+    )
+
+
+def _write_key_metadata(
+    dataset_id: str,
+    created_at: str | None = None,
+) -> None:
+    path = _key_metadata_path(
+        dataset_id
+    )
+
+    payload = {
+        "schemaVersion": 1,
+        "datasetIdHash": hashlib.sha256(
+            dataset_id.encode(
+                "utf-8"
+            )
+        ).hexdigest(),
+        "algorithm": "AES-256-GCM",
+        "keyVersion": 1,
+        "storageFormat": "MEDAES01",
+        "createdAt": (
+            created_at
+            or _utc_now()
+        ),
+        "status": "ACTIVE",
+    }
+
+    encoded = (
+        json.dumps(
+            payload,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+    try:
+        fd = os.open(
+            path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL,
+            0o600,
+        )
+    except FileExistsError:
+        return
+
+    with os.fdopen(
+        fd,
+        "wb",
+    ) as f:
+        f.write(encoded)
+
+
+def ensure_dataset_key_metadata(
+    dataset_id: str,
+) -> None:
+    key_path = _key_path(
+        dataset_id
+    )
+
+    metadata_path = (
+        _key_metadata_path(
+            dataset_id
+        )
+    )
+
+    if metadata_path.exists():
+        return
+
+    if not key_path.exists():
+        raise FileNotFoundError(
+            "Hospital dataset encryption key not found"
+        )
+
+    created = (
+        datetime.fromtimestamp(
+            key_path.stat().st_mtime,
+            timezone.utc,
+        )
+        .replace(
+            microsecond=0
+        )
+        .isoformat()
+        .replace(
+            "+00:00",
+            "Z",
+        )
+    )
+
+    _write_key_metadata(
+        dataset_id,
+        created_at=created,
+    )
+
+
+def load_dataset_key_metadata(
+    dataset_id: str,
+) -> dict:
+    ensure_dataset_key_metadata(
+        dataset_id
+    )
+
+    path = _key_metadata_path(
+        dataset_id
+    )
+
+    try:
+        metadata = json.loads(
+            path.read_text(
+                encoding="utf-8"
+            )
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Dataset key metadata is invalid"
+        ) from exc
+
+    expected_hash = hashlib.sha256(
+        dataset_id.encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+    if (
+        metadata.get(
+            "datasetIdHash"
+        )
+        != expected_hash
+    ):
+        raise RuntimeError(
+            "Dataset key metadata identity mismatch"
+        )
+
+    if metadata.get(
+        "algorithm"
+    ) != "AES-256-GCM":
+        raise RuntimeError(
+            "Unsupported dataset key algorithm"
+        )
+
+    if metadata.get(
+        "keyVersion"
+    ) != 1:
+        raise RuntimeError(
+            "Unsupported dataset key version"
+        )
+
+    if metadata.get(
+        "status"
+    ) != "ACTIVE":
+        raise RuntimeError(
+            "Dataset key is not active"
+        )
+
+    return metadata
+
+
 def dataset_key_exists(
     dataset_id: str,
 ) -> bool:
@@ -70,14 +252,18 @@ def dataset_key_exists(
 def delete_dataset_key(
     dataset_id: str,
 ) -> None:
-    path = _key_path(
-        dataset_id
-    )
-
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
+    for path in (
+        _key_path(
+            dataset_id
+        ),
+        _key_metadata_path(
+            dataset_id
+        ),
+    ):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def get_or_create_dataset_key(
@@ -92,6 +278,10 @@ def get_or_create_dataset_key(
             raise RuntimeError(
                 "Stored dataset key is invalid"
             )
+
+        ensure_dataset_key_metadata(
+            dataset_id
+        )
 
         return key
 
@@ -115,6 +305,25 @@ def get_or_create_dataset_key(
             pass
         raise
 
+    try:
+        _write_key_metadata(
+            dataset_id
+        )
+    except Exception:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+        try:
+            _key_metadata_path(
+                dataset_id
+            ).unlink()
+        except FileNotFoundError:
+            pass
+
+        raise
+
     return key
 
 
@@ -134,6 +343,10 @@ def load_dataset_key(
         raise RuntimeError(
             "Stored dataset key is invalid"
         )
+
+    load_dataset_key_metadata(
+        dataset_id
+    )
 
     return key
 
