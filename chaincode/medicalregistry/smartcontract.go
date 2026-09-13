@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	DatasetPrefix = "DATASET_"
-	AccessPrefix  = "ACCESS_"
+	DatasetPrefix     = "DATASET_"
+	AccessPrefix      = "ACCESS_"
+	KeyRotationPrefix = "KEYROT_"
 )
 
 type SmartContract struct {
@@ -44,6 +45,15 @@ type AccessRequest struct {
 	DecidedBy    string `json:"decidedBy"`
 }
 
+type KeyRotationRecord struct {
+	DatasetID          string `json:"datasetId"`
+	PreviousKeyVersion int    `json:"previousKeyVersion"`
+	NewKeyVersion      int    `json:"newKeyVersion"`
+	OwnerOrg           string `json:"ownerOrg"`
+	Status             string `json:"status"`
+	RotatedAt          string `json:"rotatedAt"`
+}
+
 func txTimeUTC(ctx contractapi.TransactionContextInterface) (string, error) {
 	ts, err := ctx.GetStub().GetTxTimestamp()
 	if err != nil {
@@ -53,6 +63,15 @@ func txTimeUTC(ctx contractapi.TransactionContextInterface) (string, error) {
 }
 func datasetKey(id string) string { return DatasetPrefix + id }
 func accessKey(id string) string  { return AccessPrefix + id }
+
+func keyRotationKey(datasetID string, newVersion int) string {
+	return fmt.Sprintf(
+		"%s%s_%010d",
+		KeyRotationPrefix,
+		datasetID,
+		newVersion,
+	)
+}
 
 func (s *SmartContract) RegisterDataset(ctx contractapi.TransactionContextInterface,
 	datasetID, cid, sha256, dataType, metadataSummary, consentState string) error {
@@ -126,6 +145,220 @@ func (s *SmartContract) DatasetExists(ctx contractapi.TransactionContextInterfac
 		return false, err
 	}
 	return b != nil, nil
+}
+
+func parsePositiveKeyVersion(
+	raw string,
+	field string,
+) (int, error) {
+	value, err := strconv.Atoi(
+		strings.TrimSpace(raw),
+	)
+
+	if err != nil || value < 1 {
+		return 0, fmt.Errorf(
+			"%s must be a positive integer",
+			field,
+		)
+	}
+
+	return value, nil
+}
+
+func (s *SmartContract) KeyRotationExists(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+	newKeyVersionRaw string,
+) (bool, error) {
+
+	newVersion, err := parsePositiveKeyVersion(
+		newKeyVersionRaw,
+		"newKeyVersion",
+	)
+
+	if err != nil {
+		return false, err
+	}
+
+	b, err := ctx.GetStub().GetState(
+		keyRotationKey(
+			datasetID,
+			newVersion,
+		),
+	)
+
+	if err != nil {
+		return false, err
+	}
+
+	return b != nil, nil
+}
+
+func (s *SmartContract) ReadKeyRotation(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+	newKeyVersionRaw string,
+) (*KeyRotationRecord, error) {
+
+	newVersion, err := parsePositiveKeyVersion(
+		newKeyVersionRaw,
+		"newKeyVersion",
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	b, err := ctx.GetStub().GetState(
+		keyRotationKey(
+			datasetID,
+			newVersion,
+		),
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if b == nil {
+		return nil, fmt.Errorf(
+			"key rotation for dataset %s version %d does not exist",
+			datasetID,
+			newVersion,
+		)
+	}
+
+	var record KeyRotationRecord
+
+	if err := json.Unmarshal(
+		b,
+		&record,
+	); err != nil {
+		return nil, err
+	}
+
+	return &record, nil
+}
+
+func (s *SmartContract) RecordKeyRotation(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+	previousKeyVersionRaw string,
+	newKeyVersionRaw string,
+) error {
+
+	if strings.TrimSpace(datasetID) == "" {
+		return fmt.Errorf(
+			"datasetID is required",
+		)
+	}
+
+	previousVersion, err := parsePositiveKeyVersion(
+		previousKeyVersionRaw,
+		"previousKeyVersion",
+	)
+
+	if err != nil {
+		return err
+	}
+
+	newVersion, err := parsePositiveKeyVersion(
+		newKeyVersionRaw,
+		"newKeyVersion",
+	)
+
+	if err != nil {
+		return err
+	}
+
+	if newVersion != previousVersion+1 {
+		return fmt.Errorf(
+			"new key version must be exactly previous version + 1",
+		)
+	}
+
+	dataset, err := s.ReadDataset(
+		ctx,
+		datasetID,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	callerOrg, err := ctx.GetClientIdentity().GetMSPID()
+
+	if err != nil {
+		return fmt.Errorf(
+			"failed to read caller MSP ID: %w",
+			err,
+		)
+	}
+
+	if callerOrg != dataset.OwnerOrg {
+		return fmt.Errorf(
+			"only dataset owner organisation %s can record key rotation",
+			dataset.OwnerOrg,
+		)
+	}
+
+	key := keyRotationKey(
+		datasetID,
+		newVersion,
+	)
+
+	existing, err := ctx.GetStub().GetState(
+		key,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	if existing != nil {
+		return fmt.Errorf(
+			"key rotation for dataset %s version %d already exists",
+			datasetID,
+			newVersion,
+		)
+	}
+
+	rotatedAt, err := txTimeUTC(
+		ctx,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	record := KeyRotationRecord{
+		DatasetID:          datasetID,
+		PreviousKeyVersion: previousVersion,
+		NewKeyVersion:      newVersion,
+		OwnerOrg:           dataset.OwnerOrg,
+		Status:             "COMMITTED",
+		RotatedAt:          rotatedAt,
+	}
+
+	b, err := json.Marshal(
+		record,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	if err := ctx.GetStub().PutState(
+		key,
+		b,
+	); err != nil {
+		return err
+	}
+
+	return ctx.GetStub().SetEvent(
+		"DatasetKeyRotated",
+		b,
+	)
 }
 
 func (s *SmartContract) UpdateConsent(ctx contractapi.TransactionContextInterface, datasetID, consentState string) error {

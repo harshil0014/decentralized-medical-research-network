@@ -15,6 +15,9 @@ from backend.storage_crypto import (
     delete_dataset_key,
     encrypt_file,
     is_encrypted_dataset,
+    load_dataset_key_metadata,
+    rollback_dataset_key_rotation,
+    rotate_dataset_key,
     sha256_bytes,
 )
 
@@ -490,6 +493,151 @@ def update_dataset_consent(dataset_id: str, body: ConsentUpdateInput):
 
     raw = query("ReadDataset", [dataset_id], "org1")
     return json.loads(raw)
+
+
+@app.post("/datasets/{dataset_id}/rotate-key")
+def rotate_dataset_encryption_key(
+    dataset_id: str,
+):
+    dataset = json.loads(
+        query(
+            "ReadDataset",
+            [dataset_id],
+            "org1",
+        )
+    )
+
+    if dataset.get(
+        "ownerOrg"
+    ) != "Org1MSP":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Dataset is not owned by "
+                "the hospital organisation"
+            ),
+        )
+
+    before = load_dataset_key_metadata(
+        dataset_id
+    )
+
+    previous_version = int(
+        before[
+            "activeKeyVersion"
+        ]
+    )
+
+    local_rotation = rotate_dataset_key(
+        dataset_id
+    )
+
+    new_version = int(
+        local_rotation[
+            "activeKeyVersion"
+        ]
+    )
+
+    try:
+        invoke(
+            "RecordKeyRotation",
+            [
+                dataset_id,
+                str(
+                    previous_version
+                ),
+                str(
+                    new_version
+                ),
+            ],
+            "org1",
+        )
+
+    except HTTPException as invoke_error:
+
+        try:
+            committed = (
+                query(
+                    "KeyRotationExists",
+                    [
+                        dataset_id,
+                        str(
+                            new_version
+                        ),
+                    ],
+                    "org1",
+                )
+                == "true"
+            )
+
+        except HTTPException as confirm_error:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": (
+                        "Local key rotation completed, "
+                        "but Fabric audit state could "
+                        "not be confirmed"
+                    ),
+                    "datasetId": dataset_id,
+                    "previousKeyVersion": previous_version,
+                    "activeKeyVersion": new_version,
+                    "action": (
+                        "Do not rotate again until "
+                        "Fabric state is reconciled"
+                    ),
+                },
+            ) from confirm_error
+
+        if not committed:
+            rollback_dataset_key_rotation(
+                dataset_id,
+                previous_version,
+                new_version,
+            )
+
+            raise invoke_error
+
+    try:
+        audit = json.loads(
+            query(
+                "ReadKeyRotation",
+                [
+                    dataset_id,
+                    str(
+                        new_version
+                    ),
+                ],
+                "org1",
+            )
+        )
+
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": (
+                    "Key rotation committed, "
+                    "but audit record could not "
+                    "be read back"
+                ),
+                "datasetId": dataset_id,
+                "activeKeyVersion": new_version,
+            },
+        ) from exc
+
+    after = load_dataset_key_metadata(
+        dataset_id
+    )
+
+    return {
+        "datasetId": dataset_id,
+        "previousKeyVersion": previous_version,
+        "activeKeyVersion": after[
+            "activeKeyVersion"
+        ],
+        "fabricAudit": audit,
+    }
 
 
 @app.post("/requests")

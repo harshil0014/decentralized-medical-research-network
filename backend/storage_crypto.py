@@ -939,6 +939,129 @@ def rotate_dataset_key(
     }
 
 
+def rollback_dataset_key_rotation(
+    dataset_id: str,
+    previous_version: int,
+    new_version: int,
+) -> dict:
+    if (
+        previous_version < 1
+        or new_version != previous_version + 1
+    ):
+        raise ValueError(
+            "Invalid key rotation rollback versions"
+        )
+
+    metadata = load_dataset_key_metadata(
+        dataset_id
+    )
+
+    active_version = int(
+        metadata[
+            "activeKeyVersion"
+        ]
+    )
+
+    if active_version != new_version:
+        raise RuntimeError(
+            "Cannot rollback key rotation: "
+            f"active version is {active_version}, "
+            f"expected {new_version}"
+        )
+
+    versions = metadata[
+        "versions"
+    ]
+
+    previous_record = versions.get(
+        str(previous_version)
+    )
+
+    new_record = versions.get(
+        str(new_version)
+    )
+
+    if (
+        not previous_record
+        or not new_record
+    ):
+        raise RuntimeError(
+            "Cannot rollback key rotation: "
+            "version registry is incomplete"
+        )
+
+    new_path = _key_path(
+        dataset_id,
+        new_version,
+    )
+
+    if not new_path.exists():
+        raise RuntimeError(
+            "Cannot rollback key rotation: "
+            "new key file is missing"
+        )
+
+    updated = json.loads(
+        json.dumps(
+            metadata
+        )
+    )
+
+    updated[
+        "versions"
+    ][
+        str(previous_version)
+    ][
+        "status"
+    ] = "ACTIVE"
+
+    del updated[
+        "versions"
+    ][
+        str(new_version)
+    ]
+
+    updated[
+        "activeKeyVersion"
+    ] = previous_version
+
+    updated[
+        "keyVersion"
+    ] = previous_version
+
+    updated[
+        "updatedAt"
+    ] = _utc_now()
+
+    # First restore metadata so the new generation is no longer
+    # referenced. Only then remove the unreferenced key file.
+    _atomic_replace_json(
+        _key_metadata_path(
+            dataset_id
+        ),
+        updated,
+    )
+
+    try:
+        new_path.unlink()
+    except FileNotFoundError:
+        pass
+
+    committed = load_dataset_key_metadata(
+        dataset_id
+    )
+
+    return {
+        "activeKeyVersion": committed[
+            "activeKeyVersion"
+        ],
+        "removedKeyVersion": new_version,
+        "rolledBackAt": committed[
+            "updatedAt"
+        ],
+    }
+
+
 def is_encrypted_dataset(
     data: bytes,
 ) -> bool:
