@@ -1,5 +1,6 @@
 from pathlib import Path
 import hashlib
+import base64
 import json
 import os
 import subprocess
@@ -169,6 +170,103 @@ def invoke(function: str, args: list[str], org: str) -> None:
     )
 
 
+def invoke_private_org1(
+    function: str,
+    args: list[str],
+    transient: dict,
+) -> None:
+    """
+    Submit a private-data write ONLY to the Org1 peer.
+
+    Transient values are base64 encoded because the peer CLI
+    expects a JSON transient map whose values are base64 strings.
+
+    Never add the Org2 peer to this proposal: transient medical
+    storage metadata must not be disclosed to the researcher org.
+    """
+
+    payload = json.dumps(
+        {
+            "function": function,
+            "Args": args,
+        }
+    )
+
+    encoded_transient = {}
+
+    for key, value in transient.items():
+        if isinstance(
+            value,
+            bytes,
+        ):
+            raw = value
+
+        elif isinstance(
+            value,
+            str,
+        ):
+            raw = value.encode(
+                "utf-8"
+            )
+
+        else:
+            raw = json.dumps(
+                value,
+                separators=(
+                    ",",
+                    ":",
+                ),
+            ).encode(
+                "utf-8"
+            )
+
+        encoded_transient[
+            key
+        ] = base64.b64encode(
+            raw
+        ).decode(
+            "ascii"
+        )
+
+    run(
+        [
+            str(PEER_BIN),
+            "chaincode",
+            "invoke",
+            "-o",
+            "localhost:7050",
+            "--ordererTLSHostnameOverride",
+            "orderer.example.com",
+            "--tls",
+            "--cafile",
+            str(ORDERER_CA),
+            "-C",
+            "mychannel",
+            "-n",
+            "medicalregistry",
+
+            # Deliberately ONLY Org1.
+            "--peerAddresses",
+            "localhost:7051",
+            "--tlsRootCertFiles",
+            str(ORG1_TLS),
+
+            "-c",
+            payload,
+
+            "--transient",
+            json.dumps(
+                encoded_transient
+            ),
+
+            "--waitForEvent",
+            "--waitForEventTimeout",
+            "30s",
+        ],
+        "org1",
+    )
+
+
 @app.get("/health")
 def health():
     result = subprocess.run(
@@ -200,9 +298,38 @@ def upload_dataset(
     container_path = None
     cid = None
     key_existed_before = None
+
+    # Registration is now a three-stage Fabric transaction:
+    #
+    # 1. public PRIVATE_PENDING record
+    # 2. Org1-only transient CID/SHA -> implicit private collection
+    # 3. public PRIVATE_READY finalization
+    #
+    # Once stage 1 has definitely committed, local encrypted
+    # storage must be preserved unless we can definitely cancel
+    # the pending registration.
+    public_registered = False
     fabric_registered = False
+    preserve_assets = False
 
     try:
+        already_exists = (
+            query(
+                "DatasetExists",
+                [dataset_id],
+                "org1",
+            )
+            == "true"
+        )
+
+        if already_exists:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Dataset {dataset_id} already exists"
+                ),
+            )
+
         suffix = Path(file.filename or "upload.bin").suffix
 
         with tempfile.NamedTemporaryFile(
@@ -361,25 +488,308 @@ def upload_dataset(
 
         cid = added.stdout.strip()
 
-        invoke(
-            "RegisterDataset",
-            [
-                dataset_id,
-                cid,
-                digest,
-                data_type,
-                metadata_summary,
-                consent_state,
-            ],
+        # ====================================================
+        # STAGE 1
+        # Public dataset metadata only.
+        #
+        # CID and SHA are deliberately NOT arguments here.
+        # ====================================================
+
+        try:
+            invoke(
+                "RegisterDataset",
+                [
+                    dataset_id,
+                    data_type,
+                    metadata_summary,
+                    consent_state,
+                ],
+                "org1",
+            )
+
+            public_registered = True
+            preserve_assets = True
+
+        except HTTPException as register_error:
+
+            # An invoke can fail locally after Fabric has already
+            # committed it. Determine state before deleting the
+            # encrypted object or AES key.
+            try:
+                exists_after_error = (
+                    query(
+                        "DatasetExists",
+                        [dataset_id],
+                        "org1",
+                    )
+                    == "true"
+                )
+
+            except HTTPException as confirm_error:
+                preserve_assets = True
+
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "message": (
+                            "Dataset public registration result "
+                            "could not be confirmed"
+                        ),
+                        "datasetId": dataset_id,
+                        "action": (
+                            "Preserving encrypted storage and key. "
+                            "Reconcile Fabric state before retrying."
+                        ),
+                    },
+                ) from confirm_error
+
+            if not exists_after_error:
+                # Definitely not committed. Normal finally cleanup
+                # may safely remove this upload's pin/new key.
+                raise register_error
+
+            pending = json.loads(
+                query(
+                    "DiscoverDataset",
+                    [dataset_id],
+                    "org1",
+                )
+            )
+
+            if (
+                pending.get("datasetId") != dataset_id
+                or pending.get("ownerOrg") != "Org1MSP"
+                or pending.get("storageState")
+                != "PRIVATE_PENDING"
+            ):
+                preserve_assets = True
+
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": (
+                            "Dataset ID exists but does not match "
+                            "the expected pending registration"
+                        ),
+                        "datasetId": dataset_id,
+                    },
+                ) from register_error
+
+            # Fabric committed stage 1 despite the local invoke
+            # error. Continue from the confirmed pending state.
+            public_registered = True
+            preserve_assets = True
+
+
+        # ====================================================
+        # STAGE 2
+        # CID/SHA go only through transient data to Org1's
+        # implicit private collection.
+        # ====================================================
+
+        private_locator_present = False
+
+        try:
+            invoke_private_org1(
+                "StoreDatasetLocatorPrivate",
+                [dataset_id],
+                {
+                    "dataset_locator": {
+                        "cid": cid,
+                        "sha256": digest,
+                    }
+                },
+            )
+
+            private_locator_present = True
+
+        except HTTPException as private_error:
+
+            try:
+                private_locator_present = (
+                    query(
+                        "DatasetPrivateLocatorExists",
+                        [dataset_id],
+                        "org1",
+                    )
+                    == "true"
+                )
+
+            except HTTPException as confirm_error:
+                preserve_assets = True
+
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "message": (
+                            "Private locator write result "
+                            "could not be confirmed"
+                        ),
+                        "datasetId": dataset_id,
+                        "storageState": "PRIVATE_PENDING",
+                        "action": (
+                            "Encrypted storage and AES key were "
+                            "preserved for reconciliation."
+                        ),
+                    },
+                ) from confirm_error
+
+            if not private_locator_present:
+                # The private write definitely did not commit.
+                # Try to remove the public pending shell so the
+                # local encrypted upload can be safely rolled back.
+                try:
+                    invoke(
+                        "CancelPendingDatasetRegistration",
+                        [dataset_id],
+                        "org1",
+                    )
+
+                    public_registered = False
+                    preserve_assets = False
+
+                except HTTPException as cancel_error:
+
+                    # Cancellation itself may have committed despite
+                    # a local error. Confirm whether the public shell
+                    # still exists.
+                    try:
+                        still_exists = (
+                            query(
+                                "DatasetExists",
+                                [dataset_id],
+                                "org1",
+                            )
+                            == "true"
+                        )
+
+                    except HTTPException as confirm_cancel_error:
+                        preserve_assets = True
+
+                        raise HTTPException(
+                            status_code=503,
+                            detail={
+                                "message": (
+                                    "Private locator failed and "
+                                    "pending-registration cancellation "
+                                    "could not be confirmed"
+                                ),
+                                "datasetId": dataset_id,
+                                "action": (
+                                    "Local encrypted storage and key "
+                                    "were preserved."
+                                ),
+                            },
+                        ) from confirm_cancel_error
+
+                    if still_exists:
+                        preserve_assets = True
+
+                        raise HTTPException(
+                            status_code=503,
+                            detail={
+                                "message": (
+                                    "Private locator was not stored, "
+                                    "but the public pending registration "
+                                    "still exists"
+                                ),
+                                "datasetId": dataset_id,
+                                "action": (
+                                    "Local encrypted storage and key "
+                                    "were preserved."
+                                ),
+                            },
+                        ) from cancel_error
+
+                    # Cancellation did commit despite the local error.
+                    public_registered = False
+                    preserve_assets = False
+
+                # At this point we have proven:
+                # - no private locator
+                # - no public pending record
+                #
+                # Therefore ordinary cleanup is safe.
+                raise private_error
+
+
+        # ====================================================
+        # STAGE 3
+        # Public state becomes PRIVATE_READY only after Fabric
+        # can see the private-data hash.
+        # ====================================================
+
+        try:
+            invoke(
+                "FinalizeDatasetRegistration",
+                [dataset_id],
+                "org1",
+            )
+
+        except HTTPException as finalize_error:
+
+            try:
+                current = json.loads(
+                    query(
+                        "DiscoverDataset",
+                        [dataset_id],
+                        "org1",
+                    )
+                )
+
+            except HTTPException as confirm_error:
+                preserve_assets = True
+
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "message": (
+                            "Dataset finalization result "
+                            "could not be confirmed"
+                        ),
+                        "datasetId": dataset_id,
+                        "action": (
+                            "Private locator, encrypted storage, "
+                            "and AES key were preserved."
+                        ),
+                    },
+                ) from confirm_error
+
+            state = current.get(
+                "storageState"
+            )
+
+            if state != "PRIVATE_READY":
+                preserve_assets = True
+
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "message": (
+                            "Private locator exists but dataset "
+                            "registration is not finalized"
+                        ),
+                        "datasetId": dataset_id,
+                        "storageState": state,
+                        "action": (
+                            "Retry finalization/reconcile this "
+                            "dataset before uploading it again."
+                        ),
+                    },
+                ) from finalize_error
+
+            # Finalization committed despite the local error.
+
+        # From here the public record is confirmed PRIVATE_READY.
+        fabric_registered = True
+        preserve_assets = True
+
+        raw = query(
+            "ReadDatasetPrivate",
+            [dataset_id],
             "org1",
         )
 
-        # From this point onward the dataset is committed.
-        # Do NOT roll back its key or IPFS pin if a later
-        # response/query step fails.
-        fabric_registered = True
-
-        raw = query("ReadDatasetPrivate", [dataset_id], "org1")
         record = json.loads(raw)
 
         record["uploadedFilename"] = file.filename
@@ -391,7 +801,10 @@ def upload_dataset(
         # if Fabric registration never succeeded, the upload
         # must not leave durable encrypted storage or a newly
         # created hospital AES key behind.
-        if not fabric_registered:
+        if (
+            not fabric_registered
+            and not preserve_assets
+        ):
             if cid:
                 subprocess.run(
                     [
@@ -450,7 +863,17 @@ def list_datasets():
             "updatedAt": r["updatedAt"],
         }
         for r in records
-        if r.get("consentState") == "ACTIVE"
+        if (
+            r.get("consentState") == "ACTIVE"
+            and r.get(
+                "storageState",
+                "LEGACY_PUBLIC",
+            )
+            in {
+                "LEGACY_PUBLIC",
+                "PRIVATE_READY",
+            }
+        )
     ]
 
 

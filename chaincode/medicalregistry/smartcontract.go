@@ -21,14 +21,28 @@ type SmartContract struct {
 	contractapi.Contract
 }
 
+const (
+	DatasetPrivatePrefix       = "DATASET_PRIVATE_"
+	DatasetLocatorTransientKey = "dataset_locator"
+)
+
+type DatasetPrivateRecord struct {
+	DatasetID string `json:"datasetId"`
+	CID       string `json:"cid"`
+	SHA256    string `json:"sha256"`
+	OwnerOrg  string `json:"ownerOrg"`
+	StoredAt  string `json:"storedAt"`
+}
+
 type DatasetRecord struct {
 	DatasetID       string `json:"datasetId"`
-	CID             string `json:"cid"`
-	SHA256          string `json:"sha256"`
+	CID             string `json:"cid,omitempty"`
+	SHA256          string `json:"sha256,omitempty"`
 	OwnerOrg        string `json:"ownerOrg"`
 	DataType        string `json:"dataType"`
 	MetadataSummary string `json:"metadataSummary"`
 	ConsentState    string `json:"consentState"`
+	StorageState    string `json:"storageState,omitempty"`
 	Version         int    `json:"version"`
 	CreatedAt       string `json:"createdAt"`
 	UpdatedAt       string `json:"updatedAt"`
@@ -40,6 +54,7 @@ type DatasetDiscoveryRecord struct {
 	DataType        string `json:"dataType"`
 	MetadataSummary string `json:"metadataSummary"`
 	ConsentState    string `json:"consentState"`
+	StorageState    string `json:"storageState"`
 	Version         int    `json:"version"`
 	CreatedAt       string `json:"createdAt"`
 	UpdatedAt       string `json:"updatedAt"`
@@ -65,6 +80,18 @@ type KeyRotationRecord struct {
 	RotatedAt          string `json:"rotatedAt"`
 }
 
+func datasetPrivateCollection(
+	ownerOrg string,
+) string {
+	return "_implicit_org_" + ownerOrg
+}
+
+func datasetPrivateKey(
+	datasetID string,
+) string {
+	return DatasetPrivatePrefix + datasetID
+}
+
 func txTimeUTC(ctx contractapi.TransactionContextInterface) (string, error) {
 	ts, err := ctx.GetStub().GetTxTimestamp()
 	if err != nil {
@@ -84,55 +111,98 @@ func keyRotationKey(datasetID string, newVersion int) string {
 	)
 }
 
-func (s *SmartContract) RegisterDataset(ctx contractapi.TransactionContextInterface,
-	datasetID, cid, sha256, dataType, metadataSummary, consentState string) error {
+func (s *SmartContract) RegisterDataset(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+	dataType string,
+	metadataSummary string,
+	consentState string,
+) error {
 
-	if strings.TrimSpace(datasetID) == "" {
-		return fmt.Errorf("datasetID is required")
+	datasetID = strings.TrimSpace(
+		datasetID,
+	)
+
+	if datasetID == "" {
+		return fmt.Errorf(
+			"datasetID is required",
+		)
 	}
-	if strings.TrimSpace(cid) == "" {
-		return fmt.Errorf("cid is required")
-	}
-	if !validation.ValidSHA256(sha256) {
-		return fmt.Errorf("sha256 must be a 64-character hex value")
-	}
+
 	ownerOrg, err := ctx.GetClientIdentity().GetMSPID()
+
 	if err != nil {
-		return fmt.Errorf("failed to read caller MSP ID: %w", err)
+		return fmt.Errorf(
+			"failed to read caller MSP ID: %w",
+			err,
+		)
 	}
 
-	exists, err := s.DatasetExists(ctx, datasetID)
+	exists, err := s.DatasetExists(
+		ctx,
+		datasetID,
+	)
+
 	if err != nil {
 		return err
 	}
+
 	if exists {
-		return fmt.Errorf("dataset %s already exists", datasetID)
+		return fmt.Errorf(
+			"dataset %s already exists",
+			datasetID,
+		)
 	}
 
-	consent, err := validation.NormalizeConsent(consentState)
+	consent, err := validation.NormalizeConsent(
+		consentState,
+	)
+
 	if err != nil {
 		return err
 	}
-	ts, err := txTimeUTC(ctx)
+
+	ts, err := txTimeUTC(
+		ctx,
+	)
 
 	if err != nil {
-
 		return err
-
 	}
+
 	rec := DatasetRecord{
-		DatasetID: datasetID, CID: cid, SHA256: strings.ToLower(sha256),
-		OwnerOrg: ownerOrg, DataType: dataType, MetadataSummary: metadataSummary,
-		ConsentState: consent, Version: 1, CreatedAt: ts, UpdatedAt: ts,
+		DatasetID:       datasetID,
+		OwnerOrg:        ownerOrg,
+		DataType:        dataType,
+		MetadataSummary: metadataSummary,
+		ConsentState:    consent,
+		StorageState:    "PRIVATE_PENDING",
+		Version:         1,
+		CreatedAt:       ts,
+		UpdatedAt:       ts,
 	}
-	b, err := json.Marshal(rec)
+
+	b, err := json.Marshal(
+		rec,
+	)
+
 	if err != nil {
 		return err
 	}
-	if err := ctx.GetStub().PutState(datasetKey(datasetID), b); err != nil {
+
+	if err := ctx.GetStub().PutState(
+		datasetKey(
+			datasetID,
+		),
+		b,
+	); err != nil {
 		return err
 	}
-	return ctx.GetStub().SetEvent("DatasetRegistered", b)
+
+	return ctx.GetStub().SetEvent(
+		"DatasetRegistrationStarted",
+		b,
+	)
 }
 
 func (s *SmartContract) readDatasetInternal(ctx contractapi.TransactionContextInterface, datasetID string) (*DatasetRecord, error) {
@@ -150,6 +220,39 @@ func (s *SmartContract) readDatasetInternal(ctx contractapi.TransactionContextIn
 	return &rec, nil
 }
 
+func normalizedDatasetStorageState(
+	rec *DatasetRecord,
+) string {
+
+	switch rec.StorageState {
+	case "PRIVATE_PENDING":
+		return "PRIVATE_PENDING"
+
+	case "PRIVATE_READY":
+		return "PRIVATE_READY"
+
+	case "":
+		// Datasets created before private locator storage
+		// existed keep CID/SHA in historical public state.
+		return "LEGACY_PUBLIC"
+
+	default:
+		return rec.StorageState
+	}
+}
+
+func datasetStorageReady(
+	rec *DatasetRecord,
+) bool {
+
+	state := normalizedDatasetStorageState(
+		rec,
+	)
+
+	return state == "PRIVATE_READY" ||
+		state == "LEGACY_PUBLIC"
+}
+
 func datasetDiscoveryRecord(
 	rec *DatasetRecord,
 ) *DatasetDiscoveryRecord {
@@ -160,6 +263,7 @@ func datasetDiscoveryRecord(
 		DataType:        rec.DataType,
 		MetadataSummary: rec.MetadataSummary,
 		ConsentState:    rec.ConsentState,
+		StorageState:    normalizedDatasetStorageState(rec),
 		Version:         rec.Version,
 		CreatedAt:       rec.CreatedAt,
 		UpdatedAt:       rec.UpdatedAt,
@@ -230,7 +334,483 @@ func (s *SmartContract) ReadDatasetPrivate(
 		)
 	}
 
-	return rec, nil
+	state := normalizedDatasetStorageState(
+		rec,
+	)
+
+	if state == "LEGACY_PUBLIC" {
+		if strings.TrimSpace(
+			rec.CID,
+		) == "" ||
+			!validation.ValidSHA256(
+				rec.SHA256,
+			) {
+
+			return nil, fmt.Errorf(
+				"legacy dataset %s has incomplete storage metadata",
+				datasetID,
+			)
+		}
+
+		return rec, nil
+	}
+
+	if state != "PRIVATE_READY" {
+		return nil, fmt.Errorf(
+			"dataset %s private storage metadata is not ready",
+			datasetID,
+		)
+	}
+
+	privateRecord, err := s.ReadDatasetLocatorPrivate(
+		ctx,
+		datasetID,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Copy rather than mutate ledger-backed state.
+	view := *rec
+
+	view.CID = privateRecord.CID
+	view.SHA256 = privateRecord.SHA256
+
+	return &view, nil
+}
+
+func (s *SmartContract) StoreDatasetLocatorPrivate(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+) error {
+
+	rec, err := s.readDatasetInternal(
+		ctx,
+		datasetID,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	callerOrg, err := ctx.GetClientIdentity().GetMSPID()
+
+	if err != nil {
+		return fmt.Errorf(
+			"failed to read caller MSP ID: %w",
+			err,
+		)
+	}
+
+	if callerOrg != rec.OwnerOrg {
+		return fmt.Errorf(
+			"only dataset owner organisation %s can store private dataset locator",
+			rec.OwnerOrg,
+		)
+	}
+
+	if rec.StorageState != "PRIVATE_PENDING" {
+		return fmt.Errorf(
+			"dataset %s is not awaiting private storage metadata",
+			datasetID,
+		)
+	}
+
+	transient, err := ctx.GetStub().GetTransient()
+
+	if err != nil {
+		return fmt.Errorf(
+			"failed to read transient data: %w",
+			err,
+		)
+	}
+
+	raw, ok := transient[DatasetLocatorTransientKey]
+
+	if !ok || len(raw) == 0 {
+		return fmt.Errorf(
+			"transient field %s is required",
+			DatasetLocatorTransientKey,
+		)
+	}
+
+	var input struct {
+		CID    string `json:"cid"`
+		SHA256 string `json:"sha256"`
+	}
+
+	if err := json.Unmarshal(
+		raw,
+		&input,
+	); err != nil {
+		return fmt.Errorf(
+			"invalid private dataset locator JSON: %w",
+			err,
+		)
+	}
+
+	input.CID = strings.TrimSpace(
+		input.CID,
+	)
+
+	input.SHA256 = strings.ToLower(
+		strings.TrimSpace(
+			input.SHA256,
+		),
+	)
+
+	if input.CID == "" {
+		return fmt.Errorf(
+			"cid is required",
+		)
+	}
+
+	if !validation.ValidSHA256(
+		input.SHA256,
+	) {
+		return fmt.Errorf(
+			"sha256 must be a 64-character hex value",
+		)
+	}
+
+	collection := datasetPrivateCollection(
+		rec.OwnerOrg,
+	)
+
+	key := datasetPrivateKey(
+		datasetID,
+	)
+
+	existingHash, err := ctx.GetStub().GetPrivateDataHash(
+		collection,
+		key,
+	)
+
+	if err != nil {
+		return fmt.Errorf(
+			"failed to inspect private dataset locator hash: %w",
+			err,
+		)
+	}
+
+	if existingHash != nil {
+		return fmt.Errorf(
+			"private dataset locator already exists for dataset %s",
+			datasetID,
+		)
+	}
+
+	storedAt, err := txTimeUTC(
+		ctx,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	privateRecord := DatasetPrivateRecord{
+		DatasetID: datasetID,
+		CID:       input.CID,
+		SHA256:    input.SHA256,
+		OwnerOrg:  rec.OwnerOrg,
+		StoredAt:  storedAt,
+	}
+
+	b, err := json.Marshal(
+		privateRecord,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	if err := ctx.GetStub().PutPrivateData(
+		collection,
+		key,
+		b,
+	); err != nil {
+		return fmt.Errorf(
+			"failed to store private dataset locator: %w",
+			err,
+		)
+	}
+
+	return nil
+}
+
+func (s *SmartContract) DatasetPrivateLocatorExists(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+) (bool, error) {
+
+	rec, err := s.readDatasetInternal(
+		ctx,
+		datasetID,
+	)
+
+	if err != nil {
+		return false, err
+	}
+
+	hash, err := ctx.GetStub().GetPrivateDataHash(
+		datasetPrivateCollection(
+			rec.OwnerOrg,
+		),
+		datasetPrivateKey(
+			datasetID,
+		),
+	)
+
+	if err != nil {
+		return false, fmt.Errorf(
+			"failed to read private dataset locator hash: %w",
+			err,
+		)
+	}
+
+	return hash != nil, nil
+}
+
+func (s *SmartContract) ReadDatasetLocatorPrivate(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+) (*DatasetPrivateRecord, error) {
+
+	rec, err := s.readDatasetInternal(
+		ctx,
+		datasetID,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	callerOrg, err := ctx.GetClientIdentity().GetMSPID()
+
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to read caller MSP ID: %w",
+			err,
+		)
+	}
+
+	if callerOrg != rec.OwnerOrg {
+		return nil, fmt.Errorf(
+			"only dataset owner organisation %s can read private dataset locator",
+			rec.OwnerOrg,
+		)
+	}
+
+	b, err := ctx.GetStub().GetPrivateData(
+		datasetPrivateCollection(
+			rec.OwnerOrg,
+		),
+		datasetPrivateKey(
+			datasetID,
+		),
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to read private dataset locator: %w",
+			err,
+		)
+	}
+
+	if b == nil {
+		return nil, fmt.Errorf(
+			"private dataset locator does not exist for dataset %s",
+			datasetID,
+		)
+	}
+
+	var privateRecord DatasetPrivateRecord
+
+	if err := json.Unmarshal(
+		b,
+		&privateRecord,
+	); err != nil {
+		return nil, err
+	}
+
+	return &privateRecord, nil
+}
+
+func (s *SmartContract) FinalizeDatasetRegistration(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+) error {
+
+	rec, err := s.readDatasetInternal(
+		ctx,
+		datasetID,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	callerOrg, err := ctx.GetClientIdentity().GetMSPID()
+
+	if err != nil {
+		return fmt.Errorf(
+			"failed to read caller MSP ID: %w",
+			err,
+		)
+	}
+
+	if callerOrg != rec.OwnerOrg {
+		return fmt.Errorf(
+			"only dataset owner organisation %s can finalize dataset registration",
+			rec.OwnerOrg,
+		)
+	}
+
+	if rec.StorageState == "PRIVATE_READY" {
+		// Idempotent retry.
+		return nil
+	}
+
+	if rec.StorageState != "PRIVATE_PENDING" {
+		return fmt.Errorf(
+			"dataset %s is not in PRIVATE_PENDING state",
+			datasetID,
+		)
+	}
+
+	hash, err := ctx.GetStub().GetPrivateDataHash(
+		datasetPrivateCollection(
+			rec.OwnerOrg,
+		),
+		datasetPrivateKey(
+			datasetID,
+		),
+	)
+
+	if err != nil {
+		return fmt.Errorf(
+			"failed to verify private dataset locator hash: %w",
+			err,
+		)
+	}
+
+	if len(hash) == 0 {
+		return fmt.Errorf(
+			"private dataset locator has not been stored for dataset %s",
+			datasetID,
+		)
+	}
+
+	ts, err := txTimeUTC(
+		ctx,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	rec.StorageState = "PRIVATE_READY"
+	rec.UpdatedAt = ts
+
+	b, err := json.Marshal(
+		rec,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	if err := ctx.GetStub().PutState(
+		datasetKey(
+			datasetID,
+		),
+		b,
+	); err != nil {
+		return err
+	}
+
+	eventPayload, err := json.Marshal(
+		datasetDiscoveryRecord(
+			rec,
+		),
+	)
+
+	if err != nil {
+		return err
+	}
+
+	return ctx.GetStub().SetEvent(
+		"DatasetRegistrationFinalized",
+		eventPayload,
+	)
+}
+
+func (s *SmartContract) CancelPendingDatasetRegistration(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+) error {
+
+	rec, err := s.readDatasetInternal(
+		ctx,
+		datasetID,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	callerOrg, err := ctx.GetClientIdentity().GetMSPID()
+
+	if err != nil {
+		return fmt.Errorf(
+			"failed to read caller MSP ID: %w",
+			err,
+		)
+	}
+
+	if callerOrg != rec.OwnerOrg {
+		return fmt.Errorf(
+			"only dataset owner organisation %s can cancel pending dataset registration",
+			rec.OwnerOrg,
+		)
+	}
+
+	if rec.StorageState != "PRIVATE_PENDING" {
+		return fmt.Errorf(
+			"dataset %s is not in PRIVATE_PENDING state",
+			datasetID,
+		)
+	}
+
+	hash, err := ctx.GetStub().GetPrivateDataHash(
+		datasetPrivateCollection(
+			rec.OwnerOrg,
+		),
+		datasetPrivateKey(
+			datasetID,
+		),
+	)
+
+	if err != nil {
+		return fmt.Errorf(
+			"failed to inspect private dataset locator hash: %w",
+			err,
+		)
+	}
+
+	if len(hash) != 0 {
+		return fmt.Errorf(
+			"dataset %s already has private storage metadata and cannot be cancelled",
+			datasetID,
+		)
+	}
+
+	return ctx.GetStub().DelState(
+		datasetKey(
+			datasetID,
+		),
+	)
 }
 
 func (s *SmartContract) DatasetExists(ctx contractapi.TransactionContextInterface, datasetID string) (bool, error) {
@@ -513,6 +1093,13 @@ func (s *SmartContract) RequestAccess(ctx contractapi.TransactionContextInterfac
 		return fmt.Errorf("dataset %s is not available for new access requests", datasetID)
 	}
 
+	if !datasetStorageReady(ds) {
+		return fmt.Errorf(
+			"dataset %s private storage registration is not ready",
+			datasetID,
+		)
+	}
+
 	existing, err := ctx.GetStub().GetState(accessKey(requestID))
 	if err != nil {
 		return err
@@ -634,7 +1221,8 @@ func (s *SmartContract) CanAccess(ctx contractapi.TransactionContextInterface, r
 	if err != nil {
 		return false, err
 	}
-	return ds.ConsentState == "ACTIVE", nil
+	return ds.ConsentState == "ACTIVE" &&
+		datasetStorageReady(ds), nil
 }
 
 func (s *SmartContract) GetAccessHistory(ctx contractapi.TransactionContextInterface, requestID string) ([]map[string]interface{}, error) {
