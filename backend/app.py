@@ -10,11 +10,11 @@ from fastapi import FastAPI, HTTPException, Response, UploadFile, File, Form
 from pydantic import BaseModel
 
 from backend.storage_crypto import (
-    MAGIC,
     dataset_key_exists,
     decrypt_bytes,
     delete_dataset_key,
     encrypt_file,
+    is_encrypted_dataset,
     sha256_bytes,
 )
 
@@ -595,7 +595,7 @@ def download_dataset(request_id: str):
             ),
         )
 
-    if stored_bytes.startswith(MAGIC):
+    if is_encrypted_dataset(stored_bytes):
         try:
             content = decrypt_bytes(
                 dataset_data["datasetId"],

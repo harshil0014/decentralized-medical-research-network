@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import struct
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,7 +14,15 @@ from cryptography.hazmat.primitives.ciphers import (
 )
 
 
-MAGIC = b"MEDAES01"
+MAGIC_V1 = b"MEDAES01"
+MAGIC_V2 = b"MEDAES02"
+
+# Current storage format for NEW encrypted objects.
+MAGIC = MAGIC_V2
+
+KEY_VERSION_SIZE = 4
+CURRENT_KEY_VERSION = 1
+
 NONCE_SIZE = 12
 TAG_SIZE = 16
 KEY_SIZE = 32
@@ -88,10 +97,25 @@ def _utc_now() -> str:
 def _write_key_metadata(
     dataset_id: str,
     created_at: str | None = None,
+    key_version: int = CURRENT_KEY_VERSION,
+    storage_format: str = "MEDAES02",
 ) -> None:
     path = _key_metadata_path(
         dataset_id
     )
+
+    if key_version < 1:
+        raise ValueError(
+            "key_version must be positive"
+        )
+
+    if storage_format not in {
+        "MEDAES01",
+        "MEDAES02",
+    }:
+        raise ValueError(
+            "Unsupported storage format"
+        )
 
     payload = {
         "schemaVersion": 1,
@@ -101,8 +125,8 @@ def _write_key_metadata(
             )
         ).hexdigest(),
         "algorithm": "AES-256-GCM",
-        "keyVersion": 1,
-        "storageFormat": "MEDAES01",
+        "keyVersion": key_version,
+        "storageFormat": storage_format,
         "createdAt": (
             created_at
             or _utc_now()
@@ -173,9 +197,13 @@ def ensure_dataset_key_metadata(
         )
     )
 
+    # A key that predates metadata/version support belongs
+    # to the original MEDAES01 generation.
     _write_key_metadata(
         dataset_id,
         created_at=created,
+        key_version=1,
+        storage_format="MEDAES01",
     )
 
 
@@ -226,9 +254,19 @@ def load_dataset_key_metadata(
 
     if metadata.get(
         "keyVersion"
-    ) != 1:
+    ) != CURRENT_KEY_VERSION:
         raise RuntimeError(
             "Unsupported dataset key version"
+        )
+
+    if metadata.get(
+        "storageFormat"
+    ) not in {
+        "MEDAES01",
+        "MEDAES02",
+    }:
+        raise RuntimeError(
+            "Unsupported dataset storage format"
         )
 
     if metadata.get(
@@ -307,7 +345,9 @@ def get_or_create_dataset_key(
 
     try:
         _write_key_metadata(
-            dataset_id
+            dataset_id,
+            key_version=CURRENT_KEY_VERSION,
+            storage_format="MEDAES02",
         )
     except Exception:
         try:
@@ -351,6 +391,74 @@ def load_dataset_key(
     return key
 
 
+def is_encrypted_dataset(
+    data: bytes,
+) -> bool:
+    return (
+        data.startswith(
+            MAGIC_V1
+        )
+        or data.startswith(
+            MAGIC_V2
+        )
+    )
+
+
+def encrypted_storage_format(
+    data: bytes,
+) -> str | None:
+    if data.startswith(
+        MAGIC_V1
+    ):
+        return "MEDAES01"
+
+    if data.startswith(
+        MAGIC_V2
+    ):
+        return "MEDAES02"
+
+    return None
+
+
+def encrypted_key_version(
+    data: bytes,
+) -> int | None:
+    if data.startswith(
+        MAGIC_V1
+    ):
+        # MEDAES01 existed before an explicit version field.
+        return 1
+
+    if not data.startswith(
+        MAGIC_V2
+    ):
+        return None
+
+    minimum = (
+        len(MAGIC_V2)
+        + KEY_VERSION_SIZE
+    )
+
+    if len(data) < minimum:
+        raise ValueError(
+            "MEDAES02 header is truncated"
+        )
+
+    start = len(
+        MAGIC_V2
+    )
+
+    end = (
+        start
+        + KEY_VERSION_SIZE
+    )
+
+    return struct.unpack(
+        ">I",
+        data[start:end],
+    )[0]
+
+
 def encrypt_file(
     dataset_id: str,
     source: Path,
@@ -360,8 +468,38 @@ def encrypt_file(
         dataset_id
     )
 
+    metadata = (
+        load_dataset_key_metadata(
+            dataset_id
+        )
+    )
+
+    key_version = int(
+        metadata["keyVersion"]
+    )
+
+    if (
+        key_version
+        != CURRENT_KEY_VERSION
+    ):
+        raise RuntimeError(
+            "Unsupported encryption key version"
+        )
+
     nonce = os.urandom(
         NONCE_SIZE
+    )
+
+    version_bytes = (
+        struct.pack(
+            ">I",
+            key_version,
+        )
+    )
+
+    authenticated_header = (
+        MAGIC_V2
+        + version_bytes
     )
 
     encryptor = Cipher(
@@ -369,9 +507,15 @@ def encrypt_file(
         modes.GCM(nonce),
     ).encryptor()
 
-    # Bind the encrypted object to its Fabric dataset ID.
+    # Bind ciphertext to:
+    # - dataset identity
+    # - storage format
+    # - key version
     encryptor.authenticate_additional_data(
-        dataset_id.encode("utf-8")
+        authenticated_header
+        + dataset_id.encode(
+            "utf-8"
+        )
     )
 
     sha256 = hashlib.sha256()
@@ -379,10 +523,18 @@ def encrypt_file(
     with source.open("rb") as src:
         with destination.open("wb") as dst:
 
-            header = MAGIC + nonce
+            header = (
+                authenticated_header
+                + nonce
+            )
 
-            dst.write(header)
-            sha256.update(header)
+            dst.write(
+                header
+            )
+
+            sha256.update(
+                header
+            )
 
             while True:
                 chunk = src.read(
@@ -407,16 +559,28 @@ def encrypt_file(
                         encrypted
                     )
 
-            final = encryptor.finalize()
+            final = (
+                encryptor.finalize()
+            )
 
             if final:
-                dst.write(final)
-                sha256.update(final)
+                dst.write(
+                    final
+                )
+
+                sha256.update(
+                    final
+                )
 
             tag = encryptor.tag
 
-            dst.write(tag)
-            sha256.update(tag)
+            dst.write(
+                tag
+            )
+
+            sha256.update(
+                tag
+            )
 
     return sha256.hexdigest()
 
@@ -425,61 +589,168 @@ def decrypt_bytes(
     dataset_id: str,
     encrypted: bytes,
 ) -> bytes:
-    minimum = (
-        len(MAGIC)
-        + NONCE_SIZE
-        + TAG_SIZE
-    )
 
-    if len(encrypted) < minimum:
-        raise ValueError(
-            "Encrypted dataset is truncated"
-        )
+    # --------------------------------------------------------
+    # MEDAES01 — legacy format
+    # --------------------------------------------------------
 
-    if not encrypted.startswith(
-        MAGIC
+    if encrypted.startswith(
+        MAGIC_V1
     ):
-        raise ValueError(
-            "Dataset is not in MEDAES01 format"
+        minimum = (
+            len(MAGIC_V1)
+            + NONCE_SIZE
+            + TAG_SIZE
         )
 
-    offset = len(MAGIC)
+        if len(encrypted) < minimum:
+            raise ValueError(
+                "MEDAES01 dataset is truncated"
+            )
 
-    nonce = encrypted[
-        offset:
-        offset + NONCE_SIZE
-    ]
-
-    ciphertext = encrypted[
-        offset + NONCE_SIZE:
-        -TAG_SIZE
-    ]
-
-    tag = encrypted[
-        -TAG_SIZE:
-    ]
-
-    key = load_dataset_key(
-        dataset_id
-    )
-
-    decryptor = Cipher(
-        algorithms.AES(key),
-        modes.GCM(
-            nonce,
-            tag,
-        ),
-    ).decryptor()
-
-    decryptor.authenticate_additional_data(
-        dataset_id.encode("utf-8")
-    )
-
-    return (
-        decryptor.update(
-            ciphertext
+        offset = len(
+            MAGIC_V1
         )
-        + decryptor.finalize()
+
+        nonce = encrypted[
+            offset:
+            offset + NONCE_SIZE
+        ]
+
+        ciphertext = encrypted[
+            offset + NONCE_SIZE:
+            -TAG_SIZE
+        ]
+
+        tag = encrypted[
+            -TAG_SIZE:
+        ]
+
+        key = load_dataset_key(
+            dataset_id
+        )
+
+        decryptor = Cipher(
+            algorithms.AES(key),
+            modes.GCM(
+                nonce,
+                tag,
+            ),
+        ).decryptor()
+
+        # Original MEDAES01 AAD.
+        decryptor.authenticate_additional_data(
+            dataset_id.encode(
+                "utf-8"
+            )
+        )
+
+        return (
+            decryptor.update(
+                ciphertext
+            )
+            + decryptor.finalize()
+        )
+
+    # --------------------------------------------------------
+    # MEDAES02 — explicit key version
+    # --------------------------------------------------------
+
+    if encrypted.startswith(
+        MAGIC_V2
+    ):
+        minimum = (
+            len(MAGIC_V2)
+            + KEY_VERSION_SIZE
+            + NONCE_SIZE
+            + TAG_SIZE
+        )
+
+        if len(encrypted) < minimum:
+            raise ValueError(
+                "MEDAES02 dataset is truncated"
+            )
+
+        magic_end = len(
+            MAGIC_V2
+        )
+
+        version_end = (
+            magic_end
+            + KEY_VERSION_SIZE
+        )
+
+        version_bytes = encrypted[
+            magic_end:
+            version_end
+        ]
+
+        key_version = struct.unpack(
+            ">I",
+            version_bytes,
+        )[0]
+
+        if (
+            key_version
+            != CURRENT_KEY_VERSION
+        ):
+            raise RuntimeError(
+                "Dataset requires unsupported "
+                f"key version {key_version}"
+            )
+
+        nonce_end = (
+            version_end
+            + NONCE_SIZE
+        )
+
+        nonce = encrypted[
+            version_end:
+            nonce_end
+        ]
+
+        ciphertext = encrypted[
+            nonce_end:
+            -TAG_SIZE
+        ]
+
+        tag = encrypted[
+            -TAG_SIZE:
+        ]
+
+        key = load_dataset_key(
+            dataset_id
+        )
+
+        decryptor = Cipher(
+            algorithms.AES(key),
+            modes.GCM(
+                nonce,
+                tag,
+            ),
+        ).decryptor()
+
+        authenticated_header = (
+            MAGIC_V2
+            + version_bytes
+        )
+
+        decryptor.authenticate_additional_data(
+            authenticated_header
+            + dataset_id.encode(
+                "utf-8"
+            )
+        )
+
+        return (
+            decryptor.update(
+                ciphertext
+            )
+            + decryptor.finalize()
+        )
+
+    raise ValueError(
+        "Dataset is not a supported MEDAES object"
     )
 
 

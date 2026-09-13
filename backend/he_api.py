@@ -8,8 +8,8 @@ from fastapi import (
 from pydantic import BaseModel
 
 from backend.storage_crypto import (
-    MAGIC,
     decrypt_bytes,
+    is_encrypted_dataset,
 )
 
 from backend.he_service import (
@@ -171,7 +171,7 @@ def encrypt_glucose_cohort(
             dataset["sha256"],
         )
 
-        if stored_dataset_bytes.startswith(MAGIC):
+        if is_encrypted_dataset(stored_dataset_bytes):
             dataset_bytes = decrypt_bytes(
                 payload.dataset_id,
                 stored_dataset_bytes,
