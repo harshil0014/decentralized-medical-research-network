@@ -1,8 +1,9 @@
-package medicalregistry
+package main
 
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -384,4 +385,277 @@ func (s *SmartContract) GetDatasetHistory(ctx contractapi.TransactionContextInte
 		out = append(out, row)
 	}
 	return out, nil
+}
+
+// -----------------------------------------------------------------------------
+// Homomorphic-encryption research provenance
+//
+// IMPORTANT:
+// This ledger record stores only hashes and workflow metadata.
+// It never stores plaintext medical values, decrypted aggregates,
+// Microsoft SEAL secret keys, or raw ciphertext bytes.
+// -----------------------------------------------------------------------------
+
+const HEJobPrefix = "HEJOB_"
+
+type HEJobRecord struct {
+	JobID                    string `json:"jobId"`
+	Metric                   string `json:"metric"`
+	CohortSize               int    `json:"cohortSize"`
+	CiphertextManifestSHA256 string `json:"ciphertextManifestSha256"`
+	ResultSHA256             string `json:"resultSha256"`
+	OwnerOrg                 string `json:"ownerOrg"`
+	ResearcherOrg            string `json:"researcherOrg"`
+	Status                   string `json:"status"`
+	CreatedAt                string `json:"createdAt"`
+	ComputedAt               string `json:"computedAt"`
+	DecryptedAt              string `json:"decryptedAt"`
+}
+
+func heJobKey(id string) string {
+	return HEJobPrefix + id
+}
+
+// RegisterHEJob is called by the hospital after creating the encrypted cohort.
+// Only a SHA-256 manifest of the ciphertext set is placed on-chain.
+func (s *SmartContract) RegisterHEJob(
+	ctx contractapi.TransactionContextInterface,
+	jobID string,
+	metric string,
+	cohortSizeRaw string,
+	ciphertextManifestSHA256 string,
+) error {
+
+	if strings.TrimSpace(jobID) == "" {
+		return fmt.Errorf("jobID is required")
+	}
+
+	if strings.TrimSpace(metric) == "" {
+		return fmt.Errorf("metric is required")
+	}
+
+	cohortSize, err := strconv.Atoi(cohortSizeRaw)
+	if err != nil || cohortSize < 1 {
+		return fmt.Errorf("cohortSize must be a positive integer")
+	}
+
+	if !validation.ValidSHA256(ciphertextManifestSHA256) {
+		return fmt.Errorf("ciphertext manifest SHA256 must be a 64-character hex value")
+	}
+
+	existing, err := ctx.GetStub().GetState(heJobKey(jobID))
+	if err != nil {
+		return err
+	}
+
+	if existing != nil {
+		return fmt.Errorf("HE job %s already exists", jobID)
+	}
+
+	ownerOrg, err := ctx.GetClientIdentity().GetMSPID()
+	if err != nil {
+		return fmt.Errorf("failed to read caller MSP ID: %w", err)
+	}
+
+	createdAt, err := txTimeUTC(ctx)
+	if err != nil {
+		return err
+	}
+
+	record := HEJobRecord{
+		JobID:                    jobID,
+		Metric:                   metric,
+		CohortSize:               cohortSize,
+		CiphertextManifestSHA256: strings.ToLower(ciphertextManifestSHA256),
+		ResultSHA256:             "",
+		OwnerOrg:                 ownerOrg,
+		ResearcherOrg:            "",
+		Status:                   "ENCRYPTED",
+		CreatedAt:                createdAt,
+		ComputedAt:               "",
+		DecryptedAt:              "",
+	}
+
+	b, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	if err := ctx.GetStub().PutState(heJobKey(jobID), b); err != nil {
+		return err
+	}
+
+	return ctx.GetStub().SetEvent("HEJobRegistered", b)
+}
+
+func (s *SmartContract) ReadHEJob(
+	ctx contractapi.TransactionContextInterface,
+	jobID string,
+) (*HEJobRecord, error) {
+
+	b, err := ctx.GetStub().GetState(heJobKey(jobID))
+	if err != nil {
+		return nil, err
+	}
+
+	if b == nil {
+		return nil, fmt.Errorf("HE job %s does not exist", jobID)
+	}
+
+	var record HEJobRecord
+
+	if err := json.Unmarshal(b, &record); err != nil {
+		return nil, err
+	}
+
+	return &record, nil
+}
+
+// RecordHEComputation is called from the researcher organisation after
+// computation finishes. Only the encrypted-result SHA-256 is recorded.
+func (s *SmartContract) RecordHEComputation(
+	ctx contractapi.TransactionContextInterface,
+	jobID string,
+	resultSHA256 string,
+) error {
+
+	if !validation.ValidSHA256(resultSHA256) {
+		return fmt.Errorf("result SHA256 must be a 64-character hex value")
+	}
+
+	record, err := s.ReadHEJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+
+	if record.Status != "ENCRYPTED" {
+		return fmt.Errorf(
+			"HE job %s must be ENCRYPTED before computation; current state is %s",
+			jobID,
+			record.Status,
+		)
+	}
+
+	researcherOrg, err := ctx.GetClientIdentity().GetMSPID()
+	if err != nil {
+		return fmt.Errorf("failed to read caller MSP ID: %w", err)
+	}
+
+	if researcherOrg == record.OwnerOrg {
+		return fmt.Errorf("researcher organisation must differ from owner organisation")
+	}
+
+	computedAt, err := txTimeUTC(ctx)
+	if err != nil {
+		return err
+	}
+
+	record.ResultSHA256 = strings.ToLower(resultSHA256)
+	record.ResearcherOrg = researcherOrg
+	record.Status = "COMPUTED"
+	record.ComputedAt = computedAt
+
+	b, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	if err := ctx.GetStub().PutState(heJobKey(jobID), b); err != nil {
+		return err
+	}
+
+	return ctx.GetStub().SetEvent("HEComputationRecorded", b)
+}
+
+// RecordHEDecryption records that the hospital decrypted the final result.
+// The decrypted result itself is deliberately NOT written to the ledger.
+func (s *SmartContract) RecordHEDecryption(
+	ctx contractapi.TransactionContextInterface,
+	jobID string,
+) error {
+
+	record, err := s.ReadHEJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+
+	if record.Status != "COMPUTED" {
+		return fmt.Errorf(
+			"HE job %s must be COMPUTED before decryption; current state is %s",
+			jobID,
+			record.Status,
+		)
+	}
+
+	callerOrg, err := ctx.GetClientIdentity().GetMSPID()
+	if err != nil {
+		return fmt.Errorf("failed to read caller MSP ID: %w", err)
+	}
+
+	if callerOrg != record.OwnerOrg {
+		return fmt.Errorf(
+			"only owner organisation %s can record decryption",
+			record.OwnerOrg,
+		)
+	}
+
+	decryptedAt, err := txTimeUTC(ctx)
+	if err != nil {
+		return err
+	}
+
+	record.Status = "DECRYPTED"
+	record.DecryptedAt = decryptedAt
+
+	b, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	if err := ctx.GetStub().PutState(heJobKey(jobID), b); err != nil {
+		return err
+	}
+
+	return ctx.GetStub().SetEvent("HEDecryptionRecorded", b)
+}
+
+func (s *SmartContract) GetHEJobHistory(
+	ctx contractapi.TransactionContextInterface,
+	jobID string,
+) ([]map[string]interface{}, error) {
+
+	iter, err := ctx.GetStub().GetHistoryForKey(heJobKey(jobID))
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	var history []map[string]interface{}
+
+	for iter.HasNext() {
+		item, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+
+		row := map[string]interface{}{
+			"txId":      item.TxId,
+			"timestamp": item.Timestamp.AsTime().UTC().Format(time.RFC3339),
+			"isDelete":  item.IsDelete,
+		}
+
+		if !item.IsDelete && len(item.Value) > 0 {
+			var value interface{}
+
+			if err := json.Unmarshal(item.Value, &value); err != nil {
+				return nil, err
+			}
+
+			row["value"] = value
+		}
+
+		history = append(history, row)
+	}
+
+	return history, nil
 }
