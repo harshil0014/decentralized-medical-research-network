@@ -400,6 +400,8 @@ const HEJobPrefix = "HEJOB_"
 
 type HEJobRecord struct {
 	JobID                    string `json:"jobId"`
+	DatasetID                string `json:"datasetId"`
+	RequestID                string `json:"requestId"`
 	Metric                   string `json:"metric"`
 	CohortSize               int    `json:"cohortSize"`
 	CiphertextManifestSHA256 string `json:"ciphertextManifestSha256"`
@@ -421,6 +423,8 @@ func heJobKey(id string) string {
 func (s *SmartContract) RegisterHEJob(
 	ctx contractapi.TransactionContextInterface,
 	jobID string,
+	datasetID string,
+	requestID string,
 	metric string,
 	cohortSizeRaw string,
 	ciphertextManifestSHA256 string,
@@ -428,6 +432,14 @@ func (s *SmartContract) RegisterHEJob(
 
 	if strings.TrimSpace(jobID) == "" {
 		return fmt.Errorf("jobID is required")
+	}
+
+	if strings.TrimSpace(datasetID) == "" {
+		return fmt.Errorf("datasetID is required")
+	}
+
+	if strings.TrimSpace(requestID) == "" {
+		return fmt.Errorf("requestID is required")
 	}
 
 	if strings.TrimSpace(metric) == "" {
@@ -440,21 +452,80 @@ func (s *SmartContract) RegisterHEJob(
 	}
 
 	if !validation.ValidSHA256(ciphertextManifestSHA256) {
-		return fmt.Errorf("ciphertext manifest SHA256 must be a 64-character hex value")
+		return fmt.Errorf(
+			"ciphertext manifest SHA256 must be a 64-character hex value",
+		)
 	}
 
-	existing, err := ctx.GetStub().GetState(heJobKey(jobID))
+	existing, err := ctx.GetStub().GetState(
+		heJobKey(jobID),
+	)
 	if err != nil {
 		return err
 	}
 
 	if existing != nil {
-		return fmt.Errorf("HE job %s already exists", jobID)
+		return fmt.Errorf(
+			"HE job %s already exists",
+			jobID,
+		)
 	}
 
-	ownerOrg, err := ctx.GetClientIdentity().GetMSPID()
+	// HE jobs are only valid when backed by a real,
+	// approved Fabric access request.
+	req, err := s.ReadAccessRequest(
+		ctx,
+		requestID,
+	)
 	if err != nil {
-		return fmt.Errorf("failed to read caller MSP ID: %w", err)
+		return err
+	}
+
+	if req.DatasetID != datasetID {
+		return fmt.Errorf(
+			"access request %s belongs to dataset %s, not %s",
+			requestID,
+			req.DatasetID,
+			datasetID,
+		)
+	}
+
+	if req.Status != "APPROVED" {
+		return fmt.Errorf(
+			"access request %s is not approved",
+			requestID,
+		)
+	}
+
+	ds, err := s.ReadDataset(
+		ctx,
+		datasetID,
+	)
+	if err != nil {
+		return err
+	}
+
+	if ds.ConsentState != "ACTIVE" {
+		return fmt.Errorf(
+			"dataset %s consent is not active",
+			datasetID,
+		)
+	}
+
+	callerOrg, err := ctx.GetClientIdentity().GetMSPID()
+	if err != nil {
+		return fmt.Errorf(
+			"failed to read caller MSP ID: %w",
+			err,
+		)
+	}
+
+	// Hospital/owner creates the encrypted research job.
+	if callerOrg != ds.OwnerOrg {
+		return fmt.Errorf(
+			"only dataset owner organisation %s can register HE job",
+			ds.OwnerOrg,
+		)
 	}
 
 	createdAt, err := txTimeUTC(ctx)
@@ -464,12 +535,14 @@ func (s *SmartContract) RegisterHEJob(
 
 	record := HEJobRecord{
 		JobID:                    jobID,
+		DatasetID:                datasetID,
+		RequestID:                requestID,
 		Metric:                   metric,
 		CohortSize:               cohortSize,
 		CiphertextManifestSHA256: strings.ToLower(ciphertextManifestSHA256),
 		ResultSHA256:             "",
-		OwnerOrg:                 ownerOrg,
-		ResearcherOrg:            "",
+		OwnerOrg:                 ds.OwnerOrg,
+		ResearcherOrg:            req.RequesterOrg,
 		Status:                   "ENCRYPTED",
 		CreatedAt:                createdAt,
 		ComputedAt:               "",
@@ -481,11 +554,17 @@ func (s *SmartContract) RegisterHEJob(
 		return err
 	}
 
-	if err := ctx.GetStub().PutState(heJobKey(jobID), b); err != nil {
+	if err := ctx.GetStub().PutState(
+		heJobKey(jobID),
+		b,
+	); err != nil {
 		return err
 	}
 
-	return ctx.GetStub().SetEvent("HEJobRegistered", b)
+	return ctx.GetStub().SetEvent(
+		"HEJobRegistered",
+		b,
+	)
 }
 
 func (s *SmartContract) ReadHEJob(
@@ -536,13 +615,34 @@ func (s *SmartContract) RecordHEComputation(
 		)
 	}
 
+	// Re-check authorization at computation time.
+	// Approval may have been revoked, or dataset consent may have changed
+	// after the HE job was originally registered.
+	allowed, err := s.CanAccess(
+		ctx,
+		record.RequestID,
+	)
+	if err != nil {
+		return err
+	}
+
+	if !allowed {
+		return fmt.Errorf(
+			"access request %s is no longer authorized for HE computation",
+			record.RequestID,
+		)
+	}
+
 	researcherOrg, err := ctx.GetClientIdentity().GetMSPID()
 	if err != nil {
 		return fmt.Errorf("failed to read caller MSP ID: %w", err)
 	}
 
-	if researcherOrg == record.OwnerOrg {
-		return fmt.Errorf("researcher organisation must differ from owner organisation")
+	if researcherOrg != record.ResearcherOrg {
+		return fmt.Errorf(
+			"only approved researcher organisation %s can record computation",
+			record.ResearcherOrg,
+		)
 	}
 
 	computedAt, err := txTimeUTC(ctx)
