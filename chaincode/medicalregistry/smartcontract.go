@@ -34,6 +34,17 @@ type DatasetRecord struct {
 	UpdatedAt       string `json:"updatedAt"`
 }
 
+type DatasetDiscoveryRecord struct {
+	DatasetID       string `json:"datasetId"`
+	OwnerOrg        string `json:"ownerOrg"`
+	DataType        string `json:"dataType"`
+	MetadataSummary string `json:"metadataSummary"`
+	ConsentState    string `json:"consentState"`
+	Version         int    `json:"version"`
+	CreatedAt       string `json:"createdAt"`
+	UpdatedAt       string `json:"updatedAt"`
+}
+
 type AccessRequest struct {
 	RequestID    string `json:"requestId"`
 	DatasetID    string `json:"datasetId"`
@@ -124,7 +135,7 @@ func (s *SmartContract) RegisterDataset(ctx contractapi.TransactionContextInterf
 	return ctx.GetStub().SetEvent("DatasetRegistered", b)
 }
 
-func (s *SmartContract) ReadDataset(ctx contractapi.TransactionContextInterface, datasetID string) (*DatasetRecord, error) {
+func (s *SmartContract) readDatasetInternal(ctx contractapi.TransactionContextInterface, datasetID string) (*DatasetRecord, error) {
 	b, err := ctx.GetStub().GetState(datasetKey(datasetID))
 	if err != nil {
 		return nil, err
@@ -137,6 +148,89 @@ func (s *SmartContract) ReadDataset(ctx contractapi.TransactionContextInterface,
 		return nil, err
 	}
 	return &rec, nil
+}
+
+func datasetDiscoveryRecord(
+	rec *DatasetRecord,
+) *DatasetDiscoveryRecord {
+
+	return &DatasetDiscoveryRecord{
+		DatasetID:       rec.DatasetID,
+		OwnerOrg:        rec.OwnerOrg,
+		DataType:        rec.DataType,
+		MetadataSummary: rec.MetadataSummary,
+		ConsentState:    rec.ConsentState,
+		Version:         rec.Version,
+		CreatedAt:       rec.CreatedAt,
+		UpdatedAt:       rec.UpdatedAt,
+	}
+}
+
+func (s *SmartContract) DiscoverDataset(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+) (*DatasetDiscoveryRecord, error) {
+
+	rec, err := s.readDatasetInternal(
+		ctx,
+		datasetID,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return datasetDiscoveryRecord(
+		rec,
+	), nil
+}
+
+// ReadDataset remains available for compatibility, but it is
+// now intentionally researcher-safe and never returns CID/SHA.
+func (s *SmartContract) ReadDataset(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+) (*DatasetDiscoveryRecord, error) {
+
+	return s.DiscoverDataset(
+		ctx,
+		datasetID,
+	)
+}
+
+// ReadDatasetPrivate exposes storage provenance only to the
+// organisation that owns the dataset.
+func (s *SmartContract) ReadDatasetPrivate(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+) (*DatasetRecord, error) {
+
+	rec, err := s.readDatasetInternal(
+		ctx,
+		datasetID,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	callerOrg, err := ctx.GetClientIdentity().GetMSPID()
+
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to read caller MSP ID: %w",
+			err,
+		)
+	}
+
+	if callerOrg != rec.OwnerOrg {
+		return nil, fmt.Errorf(
+			"only dataset owner organisation %s can read private dataset storage metadata",
+			rec.OwnerOrg,
+		)
+	}
+
+	return rec, nil
 }
 
 func (s *SmartContract) DatasetExists(ctx contractapi.TransactionContextInterface, datasetID string) (bool, error) {
@@ -277,7 +371,7 @@ func (s *SmartContract) RecordKeyRotation(
 		)
 	}
 
-	dataset, err := s.ReadDataset(
+	dataset, err := s.readDatasetInternal(
 		ctx,
 		datasetID,
 	)
@@ -362,7 +456,7 @@ func (s *SmartContract) RecordKeyRotation(
 }
 
 func (s *SmartContract) UpdateConsent(ctx contractapi.TransactionContextInterface, datasetID, consentState string) error {
-	rec, err := s.ReadDataset(ctx, datasetID)
+	rec, err := s.readDatasetInternal(ctx, datasetID)
 	if err != nil {
 		return err
 	}
@@ -411,7 +505,7 @@ func (s *SmartContract) RequestAccess(ctx contractapi.TransactionContextInterfac
 	if err != nil {
 		return fmt.Errorf("failed to read caller MSP ID: %w", err)
 	}
-	ds, err := s.ReadDataset(ctx, datasetID)
+	ds, err := s.readDatasetInternal(ctx, datasetID)
 	if err != nil {
 		return err
 	}
@@ -471,7 +565,7 @@ func (s *SmartContract) DecideAccess(ctx contractapi.TransactionContextInterface
 	if err != nil {
 		return err
 	}
-	ds, err := s.ReadDataset(ctx, req.DatasetID)
+	ds, err := s.readDatasetInternal(ctx, req.DatasetID)
 	if err != nil {
 		return err
 	}
@@ -536,7 +630,7 @@ func (s *SmartContract) CanAccess(ctx contractapi.TransactionContextInterface, r
 	if req.Status != "APPROVED" {
 		return false, nil
 	}
-	ds, err := s.ReadDataset(ctx, req.DatasetID)
+	ds, err := s.readDatasetInternal(ctx, req.DatasetID)
 	if err != nil {
 		return false, err
 	}
@@ -571,52 +665,115 @@ func (s *SmartContract) GetAccessHistory(ctx contractapi.TransactionContextInter
 	return out, nil
 }
 
-func (s *SmartContract) GetAllDatasets(ctx contractapi.TransactionContextInterface) ([]*DatasetRecord, error) {
-	iter, err := ctx.GetStub().GetStateByRange(DatasetPrefix, DatasetPrefix+"~")
+func (s *SmartContract) GetAllDatasets(
+	ctx contractapi.TransactionContextInterface,
+) ([]*DatasetDiscoveryRecord, error) {
+
+	iter, err := ctx.GetStub().GetStateByRange(
+		DatasetPrefix,
+		DatasetPrefix+"~",
+	)
+
 	if err != nil {
 		return nil, err
 	}
+
 	defer iter.Close()
-	var out []*DatasetRecord
+
+	var out []*DatasetDiscoveryRecord
+
 	for iter.HasNext() {
 		kv, err := iter.Next()
+
 		if err != nil {
 			return nil, err
 		}
+
 		var rec DatasetRecord
-		if err := json.Unmarshal(kv.Value, &rec); err != nil {
+
+		if err := json.Unmarshal(
+			kv.Value,
+			&rec,
+		); err != nil {
 			return nil, err
 		}
-		out = append(out, &rec)
+
+		out = append(
+			out,
+			datasetDiscoveryRecord(
+				&rec,
+			),
+		)
 	}
+
 	return out, nil
 }
 
-func (s *SmartContract) GetDatasetHistory(ctx contractapi.TransactionContextInterface, datasetID string) ([]map[string]interface{}, error) {
-	iter, err := ctx.GetStub().GetHistoryForKey(datasetKey(datasetID))
+func (s *SmartContract) GetDatasetHistory(
+	ctx contractapi.TransactionContextInterface,
+	datasetID string,
+) ([]map[string]interface{}, error) {
+
+	iter, err := ctx.GetStub().GetHistoryForKey(
+		datasetKey(
+			datasetID,
+		),
+	)
+
 	if err != nil {
 		return nil, err
 	}
+
 	defer iter.Close()
+
 	var out []map[string]interface{}
+
 	for iter.HasNext() {
 		item, err := iter.Next()
+
 		if err != nil {
 			return nil, err
 		}
+
 		row := map[string]interface{}{
-			"txId":      item.TxId,
-			"timestamp": item.Timestamp.AsTime().UTC().Format(time.RFC3339),
-			"isDelete":  item.IsDelete,
+			"txId": item.TxId,
+			"timestamp": item.Timestamp.
+				AsTime().
+				UTC().
+				Format(time.RFC3339),
+			"isDelete": item.IsDelete,
 		}
-		if !item.IsDelete && len(item.Value) > 0 {
-			var value interface{}
-			if json.Unmarshal(item.Value, &value) == nil {
-				row["value"] = value
+
+		if !item.IsDelete && len(
+			item.Value,
+		) > 0 {
+
+			var rec DatasetRecord
+
+			if json.Unmarshal(
+				item.Value,
+				&rec,
+			) == nil {
+
+				row["value"] = map[string]interface{}{
+					"datasetId":       rec.DatasetID,
+					"ownerOrg":        rec.OwnerOrg,
+					"dataType":        rec.DataType,
+					"metadataSummary": rec.MetadataSummary,
+					"consentState":    rec.ConsentState,
+					"version":         rec.Version,
+					"createdAt":       rec.CreatedAt,
+					"updatedAt":       rec.UpdatedAt,
+				}
 			}
 		}
-		out = append(out, row)
+
+		out = append(
+			out,
+			row,
+		)
 	}
+
 	return out, nil
 }
 
@@ -737,7 +894,7 @@ func (s *SmartContract) RegisterHEJob(
 		)
 	}
 
-	ds, err := s.ReadDataset(
+	ds, err := s.readDatasetInternal(
 		ctx,
 		datasetID,
 	)

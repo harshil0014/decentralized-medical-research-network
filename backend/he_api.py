@@ -131,7 +131,7 @@ def encrypt_glucose_cohort(
         )
 
         dataset = _fabric_query(
-            "ReadDataset",
+            "ReadDatasetPrivate",
             [payload.dataset_id],
             "org1",
         )

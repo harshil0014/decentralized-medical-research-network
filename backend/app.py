@@ -379,7 +379,7 @@ def upload_dataset(
         # response/query step fails.
         fabric_registered = True
 
-        raw = query("ReadDataset", [dataset_id], "org1")
+        raw = query("ReadDatasetPrivate", [dataset_id], "org1")
         record = json.loads(raw)
 
         record["uploadedFilename"] = file.filename
@@ -483,7 +483,11 @@ def get_dataset_history(dataset_id: str):
 
 @app.get("/datasets/{dataset_id}")
 def get_dataset(dataset_id: str):
-    raw = query("ReadDataset", [dataset_id])
+    raw = query(
+        "DiscoverDataset",
+        [dataset_id],
+        "org2",
+    )
     return json.loads(raw)
 
 
@@ -491,7 +495,7 @@ def get_dataset(dataset_id: str):
 def update_dataset_consent(dataset_id: str, body: ConsentUpdateInput):
     invoke("UpdateConsent", [dataset_id, body.consent_state], "org1")
 
-    raw = query("ReadDataset", [dataset_id], "org1")
+    raw = query("ReadDatasetPrivate", [dataset_id], "org1")
     return json.loads(raw)
 
 
@@ -501,7 +505,7 @@ def rotate_dataset_encryption_key(
 ):
     dataset = json.loads(
         query(
-            "ReadDataset",
+            "ReadDatasetPrivate",
             [dataset_id],
             "org1",
         )
@@ -698,9 +702,9 @@ def download_dataset(request_id: str):
 
     dataset_data = json.loads(
         query(
-            "ReadDataset",
+            "ReadDatasetPrivate",
             [request_data["datasetId"]],
-            "org2",
+            "org1",
         )
     )
 
