@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Medical Research Network</title>
+  <link rel="stylesheet" href="/frontend.css">
+</head>
+<body>
+  <main id="loginView" class="login-shell">
+    <section class="login-card">
+      <h1>Medical Research Network</h1>
+      <input id="tokenInput" type="password" autocomplete="off" placeholder="Access token">
+      <button id="loginButton" class="primary">Login</button>
+      <div id="loginError" class="error"></div>
+    </section>
+  </main>
+
+  <main id="appView" class="app-shell hidden">
+    <header class="topbar">
+      <div class="brand">Medical Research Network</div>
+      <div class="topbar-right">
+        <span id="roleBadge" class="badge"></span>
+        <button id="logoutButton" class="ghost">Logout</button>
+      </div>
+    </header>
+
+    <div class="body-grid">
+      <nav class="sidebar">
+        <button class="nav-button active" data-view="datasets">Datasets</button>
+        <button class="nav-button" data-view="requests">Requests</button>
+        <button class="nav-button" data-view="he">HE</button>
+      </nav>
+
+      <section class="content">
+        <section id="datasetsView" class="view"></section>
+        <section id="requestsView" class="view hidden"></section>
+        <section id="heView" class="view hidden"></section>
+      </section>
+    </div>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/frontend.js" defer></script>
+</body>
+</html>

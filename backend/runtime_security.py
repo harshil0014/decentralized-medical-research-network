@@ -25,9 +25,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; "
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self'; "
+            "connect-src 'self'; "
+            "img-src 'self' data:; "
             "frame-ancestors 'none'; "
-            "base-uri 'none'"
+            "base-uri 'none'; "
+            "form-action 'self'"
         )
 
         return response

@@ -17,6 +17,7 @@ from backend.api_auth import (
     require_researcher,
 )
 
+from backend.frontend_ui import router as frontend_router
 from backend.runtime_security import (
     SecurityHeadersMiddleware,
     require_mutation_lock,
@@ -46,6 +47,8 @@ app = FastAPI(
 app.add_middleware(
     SecurityHeadersMiddleware
 )
+
+app.include_router(frontend_router)
 
 REPO = Path(__file__).resolve().parents[1]
 FABRIC_SAMPLES = REPO.parent
