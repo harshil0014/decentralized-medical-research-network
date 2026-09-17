@@ -27,6 +27,16 @@ add_executable(
     separated/hospital_decrypt.cpp
 )
 
+add_executable(
+    researcher_sum
+    separated/researcher_sum.cpp
+)
+
+add_executable(
+    hospital_decrypt_sum
+    separated/hospital_decrypt_sum.cpp
+)
+
 target_link_libraries(
     medical_he_demo
     PRIVATE
@@ -47,6 +57,18 @@ target_link_libraries(
 
 target_link_libraries(
     hospital_decrypt
+    PRIVATE
+    SEAL::seal
+)
+
+target_link_libraries(
+    researcher_sum
+    PRIVATE
+    SEAL::seal
+)
+
+target_link_libraries(
+    hospital_decrypt_sum
     PRIVATE
     SEAL::seal
 )
