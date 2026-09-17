@@ -11,6 +11,7 @@ from backend.he_service import (
     fetch_ipfs_dataset_bytes,
     verify_dataset_bytes,
 )
+from backend.he_sum_api import router as he_sum_router
 from backend.storage_crypto import (
     decrypt_bytes,
     is_encrypted_dataset,
@@ -18,6 +19,7 @@ from backend.storage_crypto import (
 
 
 router = APIRouter()
+router.include_router(he_sum_router)
 FRONTEND_ROOT = Path(__file__).resolve().parents[1] / "frontend"
 
 
@@ -46,6 +48,14 @@ def frontend_js():
 def frontend_preview_js():
     return FileResponse(
         FRONTEND_ROOT / "preview.js",
+        media_type="application/javascript",
+    )
+
+
+@router.get("/frontend-extra-he.js", include_in_schema=False)
+def frontend_extra_he_js():
+    return FileResponse(
+        FRONTEND_ROOT / "extra-he.js",
         media_type="application/javascript",
     )
 
