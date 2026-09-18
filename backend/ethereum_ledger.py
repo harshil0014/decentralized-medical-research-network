@@ -200,7 +200,16 @@ def _he_job(row) -> dict[str, Any]:
 def _send(method: str, args: list[Any], org: str):
     try:
         fn = getattr(_contract().functions, method)(*args)
-        tx_hash = fn.transact({"from": _account(org)})
+        sender = _account(org)
+        estimated_gas = fn.estimate_gas({"from": sender})
+        gas_limit = max(
+            estimated_gas * 2,
+            estimated_gas + 100_000,
+        )
+        tx_hash = fn.transact({
+            "from": sender,
+            "gas": gas_limit,
+        })
         receipt = _web3().eth.wait_for_transaction_receipt(
             tx_hash,
             timeout=60,
