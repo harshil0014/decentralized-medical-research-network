@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "ganache": "ganache --server.host 127.0.0.1 --server.port 8545 --chain.chainId 1337 --wallet.mnemonic \"test test test test test test test test test test test junk\" --wallet.totalAccounts 10 --wallet.defaultBalance 100 --logging.quiet",
+    "ganache": "ganache --server.host 127.0.0.1 --server.port 8545 --chain.chainId 1337 --chain.hardfork shanghai --wallet.mnemonic \"test test test test test test test test test test test junk\" --wallet.totalAccounts 10 --wallet.defaultBalance 100 --logging.quiet",
     "compile": "node scripts/compile.mjs",
     "deploy": "node scripts/deploy.mjs",
     "test:contract": "node scripts/test-e2e.mjs"
