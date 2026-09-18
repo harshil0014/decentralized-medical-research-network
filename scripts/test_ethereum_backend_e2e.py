@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import io
 import os
 import tempfile
 import time
-from pathlib import Path
 
 runtime = Path(tempfile.mkdtemp(prefix="medical-api-e2e-"))
 auth = runtime / "auth"
