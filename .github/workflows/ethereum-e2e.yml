@@ -40,8 +40,13 @@ jobs:
 
       - name: Start IPFS
         run: |
-          docker run -d --name medical-ipfs -p 127.0.0.1:5001:5001 ipfs/kubo:latest
-          for i in $(seq 1 30); do
+          mkdir -p /tmp/medical-ipfs-ci
+          chmod 0777 /tmp/medical-ipfs-ci
+          docker run -d --name medical-ipfs \
+            -v /tmp/medical-ipfs-ci:/data/ipfs \
+            -p 127.0.0.1:5001:5001 \
+            ipfs/kubo:latest
+          for i in $(seq 1 60); do
             docker exec medical-ipfs ipfs id >/dev/null 2>&1 && exit 0
             sleep 1
           done
