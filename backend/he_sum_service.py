@@ -106,7 +106,7 @@ def restore_encrypted_sum_from_ipfs(
     data = _ipfs_cat_artifact(cid)
     actual = hashlib.sha256(data).hexdigest()
     if actual.lower() != expected_sha256.lower():
-        raise RuntimeError("Encrypted sum SHA256 does not match Fabric")
+        raise RuntimeError("Encrypted sum SHA256 does not match Ethereum ledger")
 
     (exchange / "glucose_sum.ct").write_bytes(data)
     return actual

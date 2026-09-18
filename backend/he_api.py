@@ -53,7 +53,7 @@ class GlucoseCohortInput(BaseModel):
     metric: str = "fasting_glucose"
 
 
-def _fabric_invoke(
+def _ledger_invoke(
     function: str,
     args: list[str],
     org: str,
@@ -69,7 +69,7 @@ def _fabric_invoke(
     )
 
 
-def _fabric_query(
+def _ledger_query(
     function: str,
     args: list[str],
     org: str,
@@ -90,7 +90,7 @@ def _require_approved_access(
     request_id: str,
 ) -> dict:
 
-    request = _fabric_query(
+    request = _ledger_query(
         "ReadAccessRequest",
         [request_id],
         "org2",
@@ -111,7 +111,7 @@ def _require_approved_access(
             detail="Research access is not approved",
         )
 
-    allowed = _fabric_query(
+    allowed = _ledger_query(
         "CanAccess",
         [request_id],
         "org2",
@@ -147,7 +147,7 @@ def encrypt_glucose_cohort(
             payload.request_id,
         )
 
-        dataset = _fabric_query(
+        dataset = _ledger_query(
             "ReadDatasetPrivate",
             [payload.dataset_id],
             "org1",
@@ -181,7 +181,7 @@ def encrypt_glucose_cohort(
             dataset["cid"]
         )
 
-        # Verify the exact IPFS object against Fabric BEFORE
+        # Verify the exact IPFS object against Ethereum BEFORE
         # attempting authenticated decryption.
         verified_sha256 = verify_dataset_bytes(
             stored_dataset_bytes,
@@ -227,7 +227,7 @@ def encrypt_glucose_cohort(
         )
 
         try:
-            _fabric_invoke(
+            _ledger_invoke(
                 "RegisterHEJob",
                 [
                     job_id,
@@ -248,7 +248,7 @@ def encrypt_glucose_cohort(
             cleanup_he_job(job_id)
             raise
 
-        ledger = _fabric_query(
+        ledger = _ledger_query(
             "ReadHEJob",
             [job_id],
             "org1",
@@ -256,7 +256,7 @@ def encrypt_glucose_cohort(
 
         if ledger.get("ciphertextCid") != ciphertext_cid:
             raise RuntimeError(
-                "Fabric ciphertext CID verification failed"
+                "Ethereum ciphertext CID verification failed"
             )
 
         # Prove that subsequent research computation must
@@ -292,15 +292,15 @@ def encrypt_glucose_cohort(
             "IPFS"
         )
 
-        result["fabric_status"] = (
+        result["ethereum_status"] = (
             ledger["status"]
         )
 
-        result["fabric_owner_org"] = (
+        result["ethereum_owner"] = (
             ledger["ownerOrg"]
         )
 
-        result["fabric_researcher_org"] = (
+        result["ethereum_researcher"] = (
             ledger["researcherOrg"]
         )
 
@@ -343,7 +343,7 @@ def compute_average(
     result_cid = None
 
     try:
-        ledger = _fabric_query(
+        ledger = _ledger_query(
             "ReadHEJob",
             [job_id],
             "org2",
@@ -406,7 +406,7 @@ def compute_average(
             )
 
         try:
-            _fabric_invoke(
+            _ledger_invoke(
                 "RecordHEComputation",
                 [
                     job_id,
@@ -429,7 +429,7 @@ def compute_average(
 
             raise
 
-        ledger = _fabric_query(
+        ledger = _ledger_query(
             "ReadHEJob",
             [job_id],
             "org2",
@@ -437,7 +437,7 @@ def compute_average(
 
         if ledger.get("resultCid") != result_cid:
             raise RuntimeError(
-                "Fabric result CID verification failed"
+                "Ethereum result CID verification failed"
             )
 
         # Researcher workspace is disposable.
@@ -470,11 +470,11 @@ def compute_average(
             "IPFS"
         )
 
-        result["fabric_status"] = (
+        result["ethereum_status"] = (
             ledger["status"]
         )
 
-        result["fabric_researcher_org"] = (
+        result["ethereum_researcher"] = (
             ledger["researcherOrg"]
         )
 
@@ -515,7 +515,7 @@ def decrypt_he_average(
     job_id: str,
 ):
     try:
-        ledger = _fabric_query(
+        ledger = _ledger_query(
             "ReadHEJob",
             [job_id],
             "org1",
@@ -565,13 +565,13 @@ def decrypt_he_average(
             job_id
         )
 
-        _fabric_invoke(
+        _ledger_invoke(
             "RecordHEDecryption",
             [job_id],
             "org1",
         )
 
-        ledger = _fabric_query(
+        ledger = _ledger_query(
             "ReadHEJob",
             [job_id],
             "org1",
@@ -603,7 +603,7 @@ def decrypt_he_average(
             verified_result_sha256
         )
 
-        result["fabric_status"] = (
+        result["ethereum_status"] = (
             ledger["status"]
         )
 
@@ -642,7 +642,7 @@ def decrypt_he_average(
 def read_he_ledger(
     job_id: str,
 ):
-    return _fabric_query(
+    return _ledger_query(
         "ReadHEJob",
         [job_id],
         "org2",
@@ -658,7 +658,7 @@ def read_he_ledger(
 def read_he_history(
     job_id: str,
 ):
-    return _fabric_query(
+    return _ledger_query(
         "GetHEJobHistory",
         [job_id],
         "org2",

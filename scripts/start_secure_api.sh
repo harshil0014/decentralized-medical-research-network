@@ -11,6 +11,14 @@ test -s "$AUTH/researcher_api.token"
 test -s "$TLS/server.key"
 test -s "$TLS/server.crt"
 
+test -s "ethereum/deployment.json"
+backend/.venv/bin/python - <<'PY'
+from backend.ethereum_ledger import health
+state = health()
+assert state["connected"] is True
+print("Ethereum:", state["network"], "chain", state["chainId"], state["contractAddress"])
+PY
+
 pkill -f "uvicorn backend.app:app" 2>/dev/null || true
 sleep 2
 

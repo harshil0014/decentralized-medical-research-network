@@ -29,3 +29,10 @@ seal_demo/artifacts/
 # Microsoft SEAL private/runtime material
 seal_demo/hospital_private/
 seal_demo/research_exchange/
+
+# Ethereum / Ganache local runtime
+ethereum/node_modules/
+ethereum/build/
+ethereum/deployment.json
+*.ganache-db/
+ethereum_private_locators.json

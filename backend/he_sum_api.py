@@ -24,18 +24,18 @@ router = APIRouter(
 )
 
 
-def _fabric_invoke(function: str, args: list[str], org: str) -> None:
+def _ledger_invoke(function: str, args: list[str], org: str) -> None:
     from backend.app import invoke
     invoke(function, args, org)
 
 
-def _fabric_query(function: str, args: list[str], org: str):
+def _ledger_query(function: str, args: list[str], org: str):
     from backend.app import query
     return json.loads(query(function, args, org))
 
 
 def _require_approved_access(dataset_id: str, request_id: str) -> None:
-    request = _fabric_query("ReadAccessRequest", [request_id], "org2")
+    request = _ledger_query("ReadAccessRequest", [request_id], "org2")
 
     if request.get("datasetId") != dataset_id:
         raise HTTPException(
@@ -68,7 +68,7 @@ def compute_sum(job_id: str):
     result_cid = None
 
     try:
-        ledger = _fabric_query("ReadHEJob", [job_id], "org2")
+        ledger = _ledger_query("ReadHEJob", [job_id], "org2")
 
         if ledger.get("status") != "ENCRYPTED":
             raise HTTPException(
@@ -103,7 +103,7 @@ def compute_sum(job_id: str):
             raise RuntimeError("Encrypted sum hash changed before IPFS publication")
 
         try:
-            _fabric_invoke(
+            _ledger_invoke(
                 "RecordHEComputation",
                 [job_id, result_cid, result["result_sha256"]],
                 "org2",
@@ -114,10 +114,10 @@ def compute_sum(job_id: str):
             remove_research_exchange(job_id)
             raise
 
-        ledger = _fabric_query("ReadHEJob", [job_id], "org2")
+        ledger = _ledger_query("ReadHEJob", [job_id], "org2")
 
         if ledger.get("resultCid") != result_cid:
-            raise RuntimeError("Fabric result CID verification failed")
+            raise RuntimeError("Ethereum result CID verification failed")
 
         remove_research_exchange(job_id)
 
@@ -130,8 +130,8 @@ def compute_sum(job_id: str):
                 "ciphertext_manifest_sha256": restored_manifest,
                 "result_cid": result_cid,
                 "result_storage": "IPFS",
-                "fabric_status": ledger["status"],
-                "fabric_researcher_org": ledger["researcherOrg"],
+                "ethereum_status": ledger["status"],
+                "ethereum_researcher": ledger["researcherOrg"],
             }
         )
 
@@ -159,7 +159,7 @@ def compute_sum(job_id: str):
 )
 def decrypt_he_sum(job_id: str):
     try:
-        ledger = _fabric_query("ReadHEJob", [job_id], "org1")
+        ledger = _ledger_query("ReadHEJob", [job_id], "org1")
 
         if ledger.get("status") != "COMPUTED":
             raise HTTPException(
@@ -190,13 +190,13 @@ def decrypt_he_sum(job_id: str):
 
         result = decrypt_sum(job_id)
 
-        _fabric_invoke(
+        _ledger_invoke(
             "RecordHEDecryption",
             [job_id],
             "org1",
         )
 
-        ledger = _fabric_query("ReadHEJob", [job_id], "org1")
+        ledger = _ledger_query("ReadHEJob", [job_id], "org1")
         remove_research_exchange(job_id)
 
         result.update(
@@ -207,7 +207,7 @@ def decrypt_he_sum(job_id: str):
                 "ciphertext_cid": ciphertext_cid,
                 "result_cid": result_cid,
                 "result_sha256_verified": verified_result_sha256,
-                "fabric_status": ledger["status"],
+                "ethereum_status": ledger["status"],
             }
         )
 

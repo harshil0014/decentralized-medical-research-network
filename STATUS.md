@@ -1,30 +1,38 @@
-# Build status
+# Build status — Ethereum / Solidity / Ganache migration
 
-## Implemented
+## Active implementation
 
-- Go chaincode based on the current Fabric Contract API v2 pattern
-- dataset registry (CID + SHA-256 + data type + non-PHI summary)
-- owner organisation automatically derived from Fabric MSP identity
-- consent state: ACTIVE / RESTRICTED / REVOKED
-- researcher organisation automatically derived from Fabric MSP identity
-- request access
-- owner-only approve / reject / revoke
-- access state transition rules
-- `CanAccess` policy check for the later IPFS/API layer
-- dataset and access history queries
-- Fabric events
-- two-org test-network walkthrough
-- synthetic demo data only
+- Ethereum-compatible local ledger: Ganache
+- Solidity governance contract
+- 100 test ETH per local Ganache account
+- Hospital = local account 0
+- Researcher = local account 1
+- FastAPI service-token roles preserved
+- AES-256-GCM encrypted datasets preserved
+- IPFS encrypted storage preserved
+- Microsoft SEAL CKKS Average preserved
+- Microsoft SEAL CKKS SUM preserved
+- DICOM utilities preserved
 
-## Locally validated in this build environment
+## Fabric replacement
 
-- `gofmt` parser/format check: PASS
-- dependency-free validation package tests: PASS
+The active backend no longer invokes Fabric peer CLI commands. Existing API endpoints call `backend.ethereum_ledger`, which translates the previous governance operations into Solidity transactions and queries.
 
-## Not executed in this environment
+Because Ethereum does not provide Fabric implicit private collections, the encrypted object's CID and SHA-256 are kept in a Hospital-local private metadata store. Solidity stores only a cryptographic commitment to that locator.
 
-The full Fabric network was not run here because this execution environment has no Docker daemon.
-The complete chaincode compile also needs the Fabric Go modules, and outbound Go module downloads are blocked here.
+## Automated validation
 
-Therefore final runtime validation is intentionally the first step on a machine with Docker/WSL2.
-Use the official Fabric `test-network`; do not treat this status file as a claim that a live Fabric network was already executed.
+`.github/workflows/ethereum-e2e.yml` runs:
+
+1. Ganache boot with 100 test ETH/account
+2. Solidity compile
+3. contract deployment
+4. Solidity contract E2E
+5. Python Ethereum adapter E2E
+6. local IPFS
+7. Microsoft SEAL 4.4 build
+8. project HE binary build
+9. DICOM regression
+10. full FastAPI + Ganache + IPFS + AES + HE Average/SUM E2E
+
+See the latest workflow run on the migration branch for the authoritative PASS/FAIL result.

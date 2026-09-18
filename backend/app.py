@@ -1,6 +1,5 @@
 from pathlib import Path
 import hashlib
-import base64
 import json
 import os
 import subprocess
@@ -51,145 +50,21 @@ app.add_middleware(
 app.include_router(frontend_router)
 
 REPO = Path(__file__).resolve().parents[1]
-FABRIC_SAMPLES = REPO.parent
-TEST_NETWORK = FABRIC_SAMPLES / "test-network"
 
-PEER_BIN = FABRIC_SAMPLES / "bin" / "peer"
-FABRIC_CONFIG = FABRIC_SAMPLES / "config"
-
-ORDERER_CA = (
-    TEST_NETWORK
-    / "organizations/ordererOrganizations/example.com/orderers/"
-      "orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem"
+from backend.ethereum_ledger import (
+    health as ethereum_health,
+    invoke as ethereum_invoke,
+    invoke_private_org1 as ethereum_invoke_private_org1,
+    query as ethereum_query,
 )
-
-ORG1_TLS = (
-    TEST_NETWORK
-    / "organizations/peerOrganizations/org1.example.com/"
-      "peers/peer0.org1.example.com/tls/ca.crt"
-)
-
-ORG2_TLS = (
-    TEST_NETWORK
-    / "organizations/peerOrganizations/org2.example.com/"
-      "peers/peer0.org2.example.com/tls/ca.crt"
-)
-
-ORG1_MSP = (
-    TEST_NETWORK
-    / "organizations/peerOrganizations/org1.example.com/"
-      "users/Admin@org1.example.com/msp"
-)
-
-ORG2_MSP = (
-    TEST_NETWORK
-    / "organizations/peerOrganizations/org2.example.com/"
-      "users/Admin@org2.example.com/msp"
-)
-
-
-class AccessRequestInput(BaseModel):
-    request_id: str
-    dataset_id: str
-    purpose: str
-
-
-class ConsentUpdateInput(BaseModel):
-    consent_state: str
-
-
-def fabric_env(org: str) -> dict:
-    env = os.environ.copy()
-    env["PATH"] = f"{FABRIC_SAMPLES / 'bin'}:{env.get('PATH', '')}"
-    env["FABRIC_CFG_PATH"] = str(FABRIC_CONFIG)
-    env["CORE_PEER_TLS_ENABLED"] = "true"
-
-    if org == "org1":
-        env["CORE_PEER_LOCALMSPID"] = "Org1MSP"
-        env["CORE_PEER_TLS_ROOTCERT_FILE"] = str(ORG1_TLS)
-        env["CORE_PEER_MSPCONFIGPATH"] = str(ORG1_MSP)
-        env["CORE_PEER_ADDRESS"] = "localhost:7051"
-    elif org == "org2":
-        env["CORE_PEER_LOCALMSPID"] = "Org2MSP"
-        env["CORE_PEER_TLS_ROOTCERT_FILE"] = str(ORG2_TLS)
-        env["CORE_PEER_MSPCONFIGPATH"] = str(ORG2_MSP)
-        env["CORE_PEER_ADDRESS"] = "localhost:9051"
-    else:
-        raise ValueError("Unknown organisation")
-
-    return env
-
-
-def run(cmd: list[str], org: str) -> str:
-    result = subprocess.run(
-        cmd,
-        cwd=TEST_NETWORK,
-        env=fabric_env(org),
-        text=True,
-        capture_output=True,
-    )
-
-    if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip()
-        raise HTTPException(status_code=500, detail=message)
-
-    return result.stdout.strip()
 
 
 def query(function: str, args: list[str], org: str = "org2") -> str:
-    payload = json.dumps({"function": function, "Args": args})
-
-    return run(
-        [
-            str(PEER_BIN),
-            "chaincode",
-            "query",
-            "-C",
-            "mychannel",
-            "-n",
-            "medicalregistry",
-            "-c",
-            payload,
-        ],
-        org,
-    )
+    return ethereum_query(function, args, org)
 
 
 def invoke(function: str, args: list[str], org: str) -> None:
-    payload = json.dumps({"function": function, "Args": args})
-
-    run(
-        [
-            str(PEER_BIN),
-            "chaincode",
-            "invoke",
-            "-o",
-            "localhost:7050",
-            "--ordererTLSHostnameOverride",
-            "orderer.example.com",
-            "--tls",
-            "--cafile",
-            str(ORDERER_CA),
-            "-C",
-            "mychannel",
-            "-n",
-            "medicalregistry",
-            "--peerAddresses",
-            "localhost:7051",
-            "--tlsRootCertFiles",
-            str(ORG1_TLS),
-            "--peerAddresses",
-            "localhost:9051",
-            "--tlsRootCertFiles",
-            str(ORG2_TLS),
-            "-c",
-            payload,
-            "--waitForEvent",
-            "--waitForEventTimeout",
-            "30s",
-        ],
-        org,
-    )
+    ethereum_invoke(function, args, org)
 
 
 def invoke_private_org1(
@@ -197,96 +72,7 @@ def invoke_private_org1(
     args: list[str],
     transient: dict,
 ) -> None:
-    """
-    Submit a private-data write ONLY to the Org1 peer.
-
-    Transient values are base64 encoded because the peer CLI
-    expects a JSON transient map whose values are base64 strings.
-
-    Never add the Org2 peer to this proposal: transient medical
-    storage metadata must not be disclosed to the researcher org.
-    """
-
-    payload = json.dumps(
-        {
-            "function": function,
-            "Args": args,
-        }
-    )
-
-    encoded_transient = {}
-
-    for key, value in transient.items():
-        if isinstance(
-            value,
-            bytes,
-        ):
-            raw = value
-
-        elif isinstance(
-            value,
-            str,
-        ):
-            raw = value.encode(
-                "utf-8"
-            )
-
-        else:
-            raw = json.dumps(
-                value,
-                separators=(
-                    ",",
-                    ":",
-                ),
-            ).encode(
-                "utf-8"
-            )
-
-        encoded_transient[
-            key
-        ] = base64.b64encode(
-            raw
-        ).decode(
-            "ascii"
-        )
-
-    run(
-        [
-            str(PEER_BIN),
-            "chaincode",
-            "invoke",
-            "-o",
-            "localhost:7050",
-            "--ordererTLSHostnameOverride",
-            "orderer.example.com",
-            "--tls",
-            "--cafile",
-            str(ORDERER_CA),
-            "-C",
-            "mychannel",
-            "-n",
-            "medicalregistry",
-
-            # Deliberately ONLY Org1.
-            "--peerAddresses",
-            "localhost:7051",
-            "--tlsRootCertFiles",
-            str(ORG1_TLS),
-
-            "-c",
-            payload,
-
-            "--transient",
-            json.dumps(
-                encoded_transient
-            ),
-
-            "--waitForEvent",
-            "--waitForEventTimeout",
-            "30s",
-        ],
-        "org1",
-    )
+    ethereum_invoke_private_org1(function, args, transient)
 
 
 @app.get("/health")
@@ -296,13 +82,12 @@ def health():
         text=True,
         capture_output=True,
     )
-
     ipfs = result.stdout.strip() if result.returncode == 0 else "unavailable"
-
+    chain = ethereum_health()
     return {
         "status": "ok",
-        "fabric_channel": "mychannel",
-        "chaincode": "medicalregistry",
+        "blockchain": "ethereum",
+        "ethereum": chain,
         "ipfs": ipfs,
     }
 
@@ -334,7 +119,7 @@ def upload_dataset(
     cid = None
     key_existed_before = None
 
-    # Registration is now a three-stage Fabric transaction:
+    # Registration is now a three-stage Ethereum transaction:
     #
     # 1. public PRIVATE_PENDING record
     # 2. Org1-only transient CID/SHA -> implicit private collection
@@ -344,7 +129,7 @@ def upload_dataset(
     # storage must be preserved unless we can definitely cancel
     # the pending registration.
     public_registered = False
-    fabric_registered = False
+    ledger_registered = False
     preserve_assets = False
 
     try:
@@ -547,7 +332,7 @@ def upload_dataset(
 
         except HTTPException as register_error:
 
-            # An invoke can fail locally after Fabric has already
+            # An invoke can fail locally after Ethereum has already
             # committed it. Determine state before deleting the
             # encrypted object or AES key.
             try:
@@ -573,7 +358,7 @@ def upload_dataset(
                         "datasetId": dataset_id,
                         "action": (
                             "Preserving encrypted storage and key. "
-                            "Reconcile Fabric state before retrying."
+                            "Reconcile Ethereum state before retrying."
                         ),
                     },
                 ) from confirm_error
@@ -610,7 +395,7 @@ def upload_dataset(
                     },
                 ) from register_error
 
-            # Fabric committed stage 1 despite the local invoke
+            # Ethereum committed stage 1 despite the local invoke
             # error. Continue from the confirmed pending state.
             public_registered = True
             preserve_assets = True
@@ -750,7 +535,7 @@ def upload_dataset(
 
         # ====================================================
         # STAGE 3
-        # Public state becomes PRIVATE_READY only after Fabric
+        # Public state becomes PRIVATE_READY only after Ethereum
         # can see the private-data hash.
         # ====================================================
 
@@ -816,7 +601,7 @@ def upload_dataset(
             # Finalization committed despite the local error.
 
         # From here the public record is confirmed PRIVATE_READY.
-        fabric_registered = True
+        ledger_registered = True
         preserve_assets = True
 
         raw = query(
@@ -833,11 +618,11 @@ def upload_dataset(
 
     finally:
         # Transactional rollback:
-        # if Fabric registration never succeeded, the upload
+        # if Ethereum registration never succeeded, the upload
         # must not leave durable encrypted storage or a newly
         # created hospital AES key behind.
         if (
-            not fabric_registered
+            not ledger_registered
             and not preserve_assets
         ):
             if cid:
@@ -1038,7 +823,7 @@ def rotate_dataset_encryption_key(
                 detail={
                     "message": (
                         "Local key rotation completed, "
-                        "but Fabric audit state could "
+                        "but Ethereum audit state could "
                         "not be confirmed"
                     ),
                     "datasetId": dataset_id,
@@ -1046,7 +831,7 @@ def rotate_dataset_encryption_key(
                     "activeKeyVersion": new_version,
                     "action": (
                         "Do not rotate again until "
-                        "Fabric state is reconciled"
+                        "Ethereum state is reconciled"
                     ),
                 },
             ) from confirm_error
@@ -1098,7 +883,7 @@ def rotate_dataset_encryption_key(
         "activeKeyVersion": after[
             "activeKeyVersion"
         ],
-        "fabricAudit": audit,
+        "ethereumAudit": audit,
     }
 
 
@@ -1147,7 +932,7 @@ def download_dataset(request_id: str):
     if allowed != "true":
         raise HTTPException(
             status_code=403,
-            detail="Access denied by Hyperledger Fabric",
+            detail="Access denied by Ethereum smart contract",
         )
 
     request_data = json.loads(
@@ -1188,7 +973,7 @@ def download_dataset(request_id: str):
 
     stored_bytes = result.stdout
 
-    # Fabric stores the SHA-256 of the exact object placed in IPFS.
+    # Ethereum ledger stores the SHA-256 of the exact object placed in IPFS.
     actual_sha256 = sha256_bytes(
         stored_bytes
     )

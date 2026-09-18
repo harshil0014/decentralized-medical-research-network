@@ -1,0 +1,74 @@
+name: Ethereum Solidity Ganache E2E
+
+on:
+  push:
+    branches:
+      - ethereum-solidity-ganache-migration
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  full-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m venv backend/.venv
+          backend/.venv/bin/pip install --upgrade pip
+          backend/.venv/bin/pip install -r requirements.txt
+
+      - name: Start Ganache, compile, deploy, contract test
+        run: |
+          chmod +x scripts/setup_ethereum_local.sh
+          ./scripts/setup_ethereum_local.sh
+
+      - name: Test Python Ethereum adapter
+        run: backend/.venv/bin/python scripts/test_ethereum_adapter.py
+
+      - name: Start IPFS
+        run: |
+          docker run -d --name medical-ipfs -p 127.0.0.1:5001:5001 ipfs/kubo:latest
+          for i in $(seq 1 30); do
+            docker exec medical-ipfs ipfs id >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          docker logs medical-ipfs
+          exit 1
+
+      - name: Install Microsoft SEAL 4.4
+        run: |
+          git clone --depth 1 --branch v4.4.0 https://github.com/microsoft/SEAL.git /tmp/SEAL
+          cmake -S /tmp/SEAL -B /tmp/SEAL/build -DSEAL_BUILD_EXAMPLES=OFF -DSEAL_BUILD_TESTS=OFF
+          cmake --build /tmp/SEAL/build -j2
+          sudo cmake --install /tmp/SEAL/build
+
+      - name: Build HE binaries
+        run: |
+          cmake -S seal_demo -B seal_demo/build
+          cmake --build seal_demo/build -j2
+          test -x seal_demo/build/hospital_encrypt
+          test -x seal_demo/build/researcher_compute
+          test -x seal_demo/build/hospital_decrypt
+          test -x seal_demo/build/researcher_sum
+          test -x seal_demo/build/hospital_decrypt_sum
+
+      - name: DICOM regression
+        run: |
+          backend/.venv/bin/python scripts/test_dicom_series.py
+
+      - name: Full backend end-to-end
+        run: |
+          backend/.venv/bin/python scripts/test_ethereum_backend_e2e.py
