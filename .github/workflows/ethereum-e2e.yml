@@ -46,7 +46,7 @@ jobs:
             --entrypoint sh \
             ipfs/kubo:latest \
             -c 'export IPFS_PATH=/tmp/ipfs; mkdir -p "$IPFS_PATH"; ipfs init; ipfs config Addresses.API /ip4/0.0.0.0/tcp/5001; exec ipfs daemon --offline'
-          for i in $(seq 1 60); do
+          for i in $(seq 1 180); do
             docker exec medical-ipfs ipfs id >/dev/null 2>&1 && exit 0
             sleep 1
           done
