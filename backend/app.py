@@ -51,6 +51,16 @@ app.include_router(frontend_router)
 
 REPO = Path(__file__).resolve().parents[1]
 
+class AccessRequestInput(BaseModel):
+    request_id: str
+    dataset_id: str
+    purpose: str
+
+
+class ConsentUpdateInput(BaseModel):
+    consent_state: str
+
+
 from backend.ethereum_ledger import (
     health as ethereum_health,
     invoke as ethereum_invoke,
