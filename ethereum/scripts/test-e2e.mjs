@@ -13,6 +13,13 @@ const researcher = await provider.getSigner(1);
 const hospitalContract = new ethers.Contract(deployment.contractAddress, abi, hospital);
 const researcherContract = hospitalContract.connect(researcher);
 
+async function sendTx(contract, method, ...args) {
+  const fn = contract.getFunction(method);
+  const estimated = await fn.estimateGas(...args);
+  const tx = await fn(...args, { gasLimit: estimated * 2n });
+  return tx.wait();
+}
+
 const suffix = Date.now().toString(36);
 const datasetId = "SOL-E2E-" + suffix;
 const requestId = "REQ-E2E-" + suffix;
@@ -26,34 +33,36 @@ const rBalance = await provider.getBalance(await researcher.getAddress());
 assert(hBalance > ethers.parseEther("90"));
 assert(rBalance > ethers.parseEther("90"));
 
-await (await hospitalContract.registerDataset(datasetId, "LAB_CSV", "Synthetic glucose cohort", "ACTIVE")).wait();
+await sendTx(hospitalContract, "registerDataset", datasetId, "LAB_CSV", "Synthetic glucose cohort", "ACTIVE");
 let ds = await hospitalContract.getDataset(datasetId);
 assert.equal(ds.storageState, "PRIVATE_PENDING");
 
-await (await hospitalContract.finalizeDataset(datasetId, commitment)).wait();
+await sendTx(hospitalContract, "finalizeDataset", datasetId, commitment);
 ds = await hospitalContract.getDataset(datasetId);
 assert.equal(ds.storageState, "PRIVATE_READY");
 
 let unauthorized = false;
 try {
-  await (await researcherContract.updateConsent(datasetId, "REVOKED")).wait();
+  await sendTx(researcherContract, "updateConsent", datasetId, "REVOKED");
 } catch (_) {
   unauthorized = true;
 }
 assert.equal(unauthorized, true);
 
-await (await researcherContract.requestAccess(requestId, datasetId, "Glucose analysis")).wait();
+await sendTx(researcherContract, "requestAccess", requestId, datasetId, "Glucose analysis");
 let req = await hospitalContract.getAccessRequest(requestId);
 assert.equal(req.status, "PENDING");
 
-await (await hospitalContract.decideAccess(requestId, "APPROVED")).wait();
+await sendTx(hospitalContract, "decideAccess", requestId, "APPROVED");
 assert.equal(await hospitalContract.canAccess(requestId), true);
 
-await (await hospitalContract.recordKeyRotation(datasetId, 1, 2)).wait();
+await sendTx(hospitalContract, "recordKeyRotation", datasetId, 1, 2);
 const rotation = await hospitalContract.getKeyRotation(datasetId, 2);
 assert.equal(rotation.status, "COMMITTED");
 
-await (await hospitalContract.registerHEJob(
+await sendTx(
+  hospitalContract,
+  "registerHEJob",
   jobId,
   datasetId,
   requestId,
@@ -61,17 +70,17 @@ await (await hospitalContract.registerHEJob(
   4,
   "bafy-ciphertext",
   fakeSha
-)).wait();
+);
 
 let job = await hospitalContract.getHEJob(jobId);
 assert.equal(job.status, "ENCRYPTED");
 assert.equal(job.researcher.toLowerCase(), (await researcher.getAddress()).toLowerCase());
 
-await (await researcherContract.recordHEComputation(jobId, "bafy-result", fakeResultSha)).wait();
+await sendTx(researcherContract, "recordHEComputation", jobId, "bafy-result", fakeResultSha);
 job = await hospitalContract.getHEJob(jobId);
 assert.equal(job.status, "COMPUTED");
 
-await (await hospitalContract.recordHEDecryption(jobId)).wait();
+await sendTx(hospitalContract, "recordHEDecryption", jobId);
 job = await hospitalContract.getHEJob(jobId);
 assert.equal(job.status, "DECRYPTED");
 
@@ -82,10 +91,10 @@ assert(dHist.length >= 2);
 assert(aHist.length >= 2);
 assert(hHist.length >= 3);
 
-await (await hospitalContract.decideAccess(requestId, "REVOKED")).wait();
+await sendTx(hospitalContract, "decideAccess", requestId, "REVOKED");
 assert.equal(await hospitalContract.canAccess(requestId), false);
 
-await (await hospitalContract.updateConsent(datasetId, "REVOKED")).wait();
+await sendTx(hospitalContract, "updateConsent", datasetId, "REVOKED");
 assert.equal(await hospitalContract.canAccess(requestId), false);
 
 console.log("GANACHE ACCOUNTS: >90 test ETH each");
