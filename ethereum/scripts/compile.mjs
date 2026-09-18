@@ -15,6 +15,7 @@ const input = {
   settings: {
     optimizer: { enabled: true, runs: 200 },
     viaIR: true,
+    evmVersion: "shanghai",
     outputSelection: {
       "*": {
         "*": ["abi", "evm.bytecode.object"]
