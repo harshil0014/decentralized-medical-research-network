@@ -267,7 +267,7 @@ contract MedicalResearchRegistry {
         emit AccessDecisionRecorded(requestId, decision, msg.sender);
     }
 
-    function canAccess(string calldata requestId) public view returns (bool) {
+    function canAccess(string memory requestId) public view returns (bool) {
         AccessRequest storage req = requests[requestId];
         if (!req.exists || !_eq(req.status, "APPROVED")) return false;
 
