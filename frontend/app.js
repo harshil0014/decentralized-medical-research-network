@@ -189,7 +189,7 @@ function renderDatasetTable() {
   table.replaceChildren();
 
   const head = document.createElement("thead");
-  head.innerHTML = "<tr><th>ID</th><th>Type</th><th>Consent</th><th>Owner</th><th>Actions</th></tr>";
+  head.innerHTML = "<tr><th>ID</th><th>Type</th><th>Consent</th><th>Owner Wallet</th><th>Actions</th></tr>";
   table.append(head);
 
   const body = document.createElement("tbody");
@@ -204,7 +204,7 @@ function renderDatasetTable() {
       cell(row.datasetId),
       cell(row.dataType),
       cell(row.consentState),
-      cell(row.ownerOrg),
+      cell(row.ownerAddress ? `${row.ownerAddress.slice(0, 8)}...${row.ownerAddress.slice(-6)}` : row.ownerOrg),
     );
 
     const actionCell = document.createElement("td");
