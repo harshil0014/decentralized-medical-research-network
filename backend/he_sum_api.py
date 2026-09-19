@@ -191,6 +191,11 @@ def decrypt_he_sum(job_id: str):
 
         result = decrypt_sum(job_id)
 
+        # CKKS uses approximate arithmetic; present a stable demo value.
+        if isinstance(result.get("sum"), (int, float)):
+            result["sum"] = round(float(result["sum"]), 6)
+            result["ckks_approximate"] = True
+
         _ledger_invoke(
             "RecordHEDecryption",
             [job_id],
