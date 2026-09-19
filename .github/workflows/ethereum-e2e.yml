@@ -3,7 +3,7 @@ name: Ethereum Solidity Ganache E2E
 on:
   push:
     branches:
-      - ethereum-solidity-ganache-migration
+      - main
   pull_request:
     branches:
       - main
