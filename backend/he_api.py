@@ -679,8 +679,21 @@ def read_he_ledger(
 def read_he_history(
     job_id: str,
 ):
-    return _ledger_query(
+    history = _ledger_query(
         "GetHEJobHistory",
         [job_id],
         "org2",
     )
+
+    for item in history:
+        value = item.get("value")
+        if not isinstance(value, dict):
+            continue
+        if value.get("ownerAddress"):
+            value["ownerRole"] = "Hospital"
+            value.pop("ownerOrg", None)
+        if value.get("researcherAddress"):
+            value["researcherRole"] = "Researcher"
+            value.pop("researcherOrg", None)
+
+    return history
