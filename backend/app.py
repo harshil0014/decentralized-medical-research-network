@@ -61,6 +61,22 @@ class ConsentUpdateInput(BaseModel):
     consent_state: str
 
 
+def _public_request_record(raw: str):
+    record = json.loads(raw)
+    # Keep legacy org labels internal to the compatibility adapter.
+    # The public/demo API should describe Ethereum actors directly.
+    if record.get("requesterAddress"):
+        record["requesterRole"] = "Researcher"
+        record.pop("requesterOrg", None)
+    if record.get("decidedByAddress"):
+        record["decidedByRole"] = "Hospital"
+        record.pop("decidedBy", None)
+    elif record.get("decidedBy") == "Org1MSP":
+        record["decidedByRole"] = "Hospital"
+        record.pop("decidedBy", None)
+    return record
+
+
 from backend.ethereum_ledger import (
     health as ethereum_health,
     invoke as ethereum_invoke,
@@ -907,13 +923,13 @@ def create_request(body: AccessRequestInput):
     )
 
     raw = query("ReadAccessRequest", [body.request_id], "org2")
-    return json.loads(raw)
+    return _public_request_record(raw)
 
 
 @app.get("/requests/{request_id}", dependencies=[Depends(require_authenticated)])
 def get_request(request_id: str):
     raw = query("ReadAccessRequest", [request_id], "org2")
-    return json.loads(raw)
+    return _public_request_record(raw)
 
 
 @app.post("/requests/{request_id}/approve", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
@@ -921,7 +937,7 @@ def approve_request(request_id: str):
     invoke("DecideAccess", [request_id, "APPROVED"], "org1")
 
     raw = query("ReadAccessRequest", [request_id], "org1")
-    return json.loads(raw)
+    return _public_request_record(raw)
 
 
 @app.post("/requests/{request_id}/revoke", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
