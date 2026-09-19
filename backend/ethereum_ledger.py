@@ -142,6 +142,7 @@ def _dataset(row) -> dict[str, Any]:
     return {
         "datasetId": row[0],
         "ownerOrg": _org_name(row[1]),
+        "ownerAddress": row[1],
         "dataType": row[2],
         "metadataSummary": row[3],
         "consentState": row[4],
@@ -158,11 +159,13 @@ def _request(row) -> dict[str, Any]:
         "requestId": row[0],
         "datasetId": row[1],
         "requesterOrg": _org_name(row[2]),
+        "requesterAddress": row[2],
         "purpose": row[3],
         "status": row[4],
         "requestedAt": _iso(row[5]),
         "decidedAt": _iso(row[6]),
         "decidedBy": "" if int(row[7], 16) == 0 else _org_name(row[7]),
+        "decidedByAddress": "" if int(row[7], 16) == 0 else row[7],
     }
 
 
@@ -172,6 +175,7 @@ def _rotation(row) -> dict[str, Any]:
         "previousKeyVersion": int(row[1]),
         "newKeyVersion": int(row[2]),
         "ownerOrg": _org_name(row[3]),
+        "ownerAddress": row[3],
         "status": row[4],
         "rotatedAt": _iso(row[5]),
     }
@@ -189,7 +193,9 @@ def _he_job(row) -> dict[str, Any]:
         "resultCid": row[7],
         "resultSha256": row[8],
         "ownerOrg": _org_name(row[9]),
+        "ownerAddress": row[9],
         "researcherOrg": _org_name(row[10]),
+        "researcherAddress": row[10],
         "status": row[11],
         "createdAt": _iso(row[12]),
         "computedAt": _iso(row[13]),
