@@ -456,6 +456,11 @@ def compute_average(
             ledger["requestId"]
         )
 
+        result["metric"] = (
+            ledger.get("metric")
+            or result.get("metric")
+        )
+
         result["ciphertext_cid"] = (
             ciphertext_cid
         )
@@ -567,6 +572,12 @@ def decrypt_he_average(
         result = decrypt_average(
             job_id
         )
+
+        # CKKS is approximate arithmetic. Present a stable demo value
+        # while preserving that the result came from approximate HE.
+        if isinstance(result.get("average"), (int, float)):
+            result["average"] = round(float(result["average"]), 6)
+            result["ckks_approximate"] = True
 
         _ledger_invoke(
             "RecordHEDecryption",
