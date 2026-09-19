@@ -131,7 +131,8 @@ def compute_sum(job_id: str):
                 "result_cid": result_cid,
                 "result_storage": "IPFS",
                 "ethereum_status": ledger["status"],
-                "ethereum_researcher": ledger["researcherOrg"],
+                "ethereum_researcher_role": "Researcher",
+                "ethereum_researcher_address": ledger.get("researcherAddress", ""),
             }
         )
 
