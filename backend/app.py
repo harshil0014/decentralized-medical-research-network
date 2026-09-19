@@ -685,6 +685,7 @@ def list_datasets():
         {
             "datasetId": r["datasetId"],
             "ownerOrg": r["ownerOrg"],
+            "ownerAddress": r.get("ownerAddress", ""),
             "dataType": r["dataType"],
             "metadataSummary": r["metadataSummary"],
             "consentState": r["consentState"],
