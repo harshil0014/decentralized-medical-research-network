@@ -296,12 +296,14 @@ def encrypt_glucose_cohort(
             ledger["status"]
         )
 
-        result["ethereum_owner"] = (
-            ledger["ownerOrg"]
+        result["ethereum_owner_role"] = "Hospital"
+        result["ethereum_owner_address"] = (
+            ledger.get("ownerAddress", "")
         )
 
-        result["ethereum_researcher"] = (
-            ledger["researcherOrg"]
+        result["ethereum_researcher_role"] = "Researcher"
+        result["ethereum_researcher_address"] = (
+            ledger.get("researcherAddress", "")
         )
 
         return result
@@ -474,8 +476,9 @@ def compute_average(
             ledger["status"]
         )
 
-        result["ethereum_researcher"] = (
-            ledger["researcherOrg"]
+        result["ethereum_researcher_role"] = "Researcher"
+        result["ethereum_researcher_address"] = (
+            ledger.get("researcherAddress", "")
         )
 
         return result
@@ -642,11 +645,18 @@ def decrypt_he_average(
 def read_he_ledger(
     job_id: str,
 ):
-    return _ledger_query(
+    record = _ledger_query(
         "ReadHEJob",
         [job_id],
         "org2",
     )
+    if record.get("ownerAddress"):
+        record["ownerRole"] = "Hospital"
+        record.pop("ownerOrg", None)
+    if record.get("researcherAddress"):
+        record["researcherRole"] = "Researcher"
+        record.pop("researcherOrg", None)
+    return record
 
 
 @router.get(
