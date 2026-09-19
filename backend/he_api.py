@@ -605,6 +605,11 @@ def decrypt_he_average(
             ledger["requestId"]
         )
 
+        result["metric"] = (
+            ledger.get("metric")
+            or result.get("metric")
+        )
+
         result["ciphertext_cid"] = (
             ciphertext_cid
         )
