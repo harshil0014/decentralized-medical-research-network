@@ -72,11 +72,18 @@ jobs:
           test -x seal_demo/build/hospital_decrypt
           test -x seal_demo/build/researcher_sum
           test -x seal_demo/build/hospital_decrypt_sum
+          test -x seal_demo/build/dicom_hospital_encrypt_stats
+          test -x seal_demo/build/dicom_researcher_compute_stats
+          test -x seal_demo/build/dicom_hospital_decrypt_stats
+          test -x seal_demo/build/dicom_hospital_encrypt_raw
+          test -x seal_demo/build/dicom_researcher_compute_raw
 
       - name: DICOM regression
         run: |
           backend/.venv/bin/python scripts/test_dicom_series.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_dicom_he_stats.py
 
       - name: Full backend end-to-end
         run: |
           backend/.venv/bin/python scripts/test_ethereum_backend_e2e.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_dicom_he_backend_e2e.py
