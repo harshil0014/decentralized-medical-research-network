@@ -10,12 +10,15 @@ from backend.he_service import fetch_ipfs_dataset_bytes, unpin_ipfs, verify_data
 from backend.dicom_he_service import (
     SUPPORTED_ANALYSES,
     SUPPORTED_HE_MODES,
+    SUPPORTED_SCOPES,
     cleanup_dicom_he_job,
     compute_encrypted_dicom_analysis,
     create_encrypted_dicom_job,
     decrypt_dicom_analysis,
     discard_encrypted_dicom_result,
     extract_dicom_analysis_values,
+    extract_dicom_seg_analysis_values,
+    list_dicom_seg_segments,
     publish_dicom_ciphertext_bundle,
     publish_encrypted_dicom_result,
     remove_dicom_research_exchange,
@@ -43,6 +46,8 @@ class DicomHEInput(BaseModel):
     scope: str = "WHOLE_VOLUME"
     slice_index: int | None = None
     roi_box: DicomROIBox | None = None
+    segmentation_dataset_id: str | None = None
+    segment_number: int | None = None
 
 
 def _invoke(function: str, args: list[str], org: str) -> None:
@@ -73,6 +78,29 @@ def _require_dicom_job(ledger: dict) -> None:
         raise HTTPException(status_code=400, detail="HE job is not a DICOM analysis job")
 
 
+def _load_private_dicom_dataset(dataset_id: str) -> tuple[dict, bytes, str, str]:
+    dataset = _query("ReadDatasetPrivate", [dataset_id], "org1")
+
+    if dataset.get("consentState") != "ACTIVE":
+        raise HTTPException(status_code=403, detail="Dataset consent is not active")
+
+    data_type = str(dataset.get("dataType") or "").upper()
+    if not data_type.startswith("DICOM"):
+        raise HTTPException(status_code=400, detail="Dataset is not DICOM")
+
+    stored = fetch_ipfs_dataset_bytes(dataset["cid"])
+    verified_sha256 = verify_dataset_bytes(stored, dataset["sha256"])
+
+    if is_encrypted_dataset(stored):
+        payload = decrypt_bytes(dataset_id, stored)
+        storage_encryption = "AES-256-GCM"
+    else:
+        payload = stored
+        storage_encryption = "LEGACY-PLAINTEXT"
+
+    return dataset, payload, storage_encryption, verified_sha256
+
+
 @router.post("/encrypt", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
 def encrypt_dicom(payload: DicomHEInput):
     ciphertext_cid = None
@@ -92,33 +120,67 @@ def encrypt_dicom(payload: DicomHEInput):
                 detail="he_mode must be one of: " + ", ".join(sorted(SUPPORTED_HE_MODES)),
             )
 
-        _require_approved_access(payload.dataset_id, payload.request_id)
-        dataset = _query("ReadDatasetPrivate", [payload.dataset_id], "org1")
+        scope = payload.scope.strip().upper()
+        if scope not in SUPPORTED_SCOPES:
+            raise HTTPException(
+                status_code=400,
+                detail="scope must be one of: " + ", ".join(sorted(SUPPORTED_SCOPES)),
+            )
 
-        if dataset.get("consentState") != "ACTIVE":
-            raise HTTPException(status_code=403, detail="Dataset consent is not active")
+        _require_approved_access(payload.dataset_id, payload.request_id)
+        dataset, dicom_bytes, storage_encryption, verified_sha256 = (
+            _load_private_dicom_dataset(payload.dataset_id)
+        )
 
         data_type = str(dataset.get("dataType") or "").upper()
-        if not data_type.startswith("DICOM"):
-            raise HTTPException(status_code=400, detail="DICOM HE requires a DICOM dataset")
+        if data_type == "DICOM_SEG":
+            raise HTTPException(
+                status_code=400,
+                detail="Primary DICOM dataset must be CT or MR, not a SEG object",
+            )
 
-        stored = fetch_ipfs_dataset_bytes(dataset["cid"])
-        verified_sha256 = verify_dataset_bytes(stored, dataset["sha256"])
+        segmentation_sha256 = None
+        segmentation_storage_encryption = None
 
-        if is_encrypted_dataset(stored):
-            dicom_bytes = decrypt_bytes(payload.dataset_id, stored)
-            storage_encryption = "AES-256-GCM"
+        if scope == "DICOM_SEG":
+            segmentation_dataset_id = str(
+                payload.segmentation_dataset_id or ""
+            ).strip()
+            if not segmentation_dataset_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="segmentation_dataset_id is required for DICOM_SEG scope",
+                )
+            if payload.segment_number is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="segment_number is required for DICOM_SEG scope",
+                )
+
+            seg_dataset, seg_bytes, segmentation_storage_encryption, segmentation_sha256 = (
+                _load_private_dicom_dataset(segmentation_dataset_id)
+            )
+            if str(seg_dataset.get("dataType") or "").upper() != "DICOM_SEG":
+                raise HTTPException(
+                    status_code=400,
+                    detail="segmentation_dataset_id must reference a DICOM SEG dataset",
+                )
+
+            values, metadata = extract_dicom_seg_analysis_values(
+                dicom_bytes,
+                seg_bytes,
+                payload.segment_number,
+            )
+            metadata["segmentation_dataset_id"] = segmentation_dataset_id
+            metadata["segmentation_dataset_sha256"] = segmentation_sha256
         else:
-            dicom_bytes = stored
-            storage_encryption = "LEGACY-PLAINTEXT"
-
-        roi_box = payload.roi_box.model_dump() if payload.roi_box else None
-        values, metadata = extract_dicom_analysis_values(
-            dicom_bytes,
-            scope=payload.scope,
-            slice_index=payload.slice_index,
-            roi_box=roi_box,
-        )
+            roi_box = payload.roi_box.model_dump() if payload.roi_box else None
+            values, metadata = extract_dicom_analysis_values(
+                dicom_bytes,
+                scope=scope,
+                slice_index=payload.slice_index,
+                roi_box=roi_box,
+            )
         result = create_encrypted_dicom_job(
             values,
             analysis,
@@ -129,6 +191,8 @@ def encrypt_dicom(payload: DicomHEInput):
         ciphertext_cid = publish_dicom_ciphertext_bundle(job_id)
 
         metric = f'DICOM:{analysis}:{metadata["scope"]}:{he_mode}'
+        if metadata["scope"] == "DICOM_SEG":
+            metric += f':SEG{metadata["segment_number"]}'
         try:
             _invoke(
                 "RegisterHEJob",
@@ -161,6 +225,12 @@ def encrypt_dicom(payload: DicomHEInput):
                 "dataset_sha256_verified": True,
                 "dataset_sha256": verified_sha256,
                 "dataset_storage_encryption": storage_encryption,
+                "segmentation_dataset_id": metadata.get("segmentation_dataset_id"),
+                "segmentation_dataset_sha256_verified": (
+                    segmentation_sha256 is not None
+                ),
+                "segmentation_dataset_sha256": segmentation_sha256,
+                "segmentation_storage_encryption": segmentation_storage_encryption,
                 "ciphertext_cid": ciphertext_cid,
                 "ciphertext_storage": "IPFS",
                 "ethereum_status": ledger["status"],
@@ -180,6 +250,41 @@ def encrypt_dicom(payload: DicomHEInput):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DICOM HE encryption failed: {exc}") from exc
+
+
+@router.get("/segments/{dataset_id}", dependencies=[Depends(require_hospital)])
+def inspect_dicom_seg(dataset_id: str):
+    try:
+        dataset, seg_bytes, storage_encryption, verified_sha256 = (
+            _load_private_dicom_dataset(dataset_id)
+        )
+        if str(dataset.get("dataType") or "").upper() != "DICOM_SEG":
+            raise HTTPException(
+                status_code=400,
+                detail="Dataset is not a DICOM SEG object",
+            )
+
+        result = list_dicom_seg_segments(seg_bytes)
+        result.update(
+            {
+                "dataset_id": dataset_id,
+                "dataset_sha256_verified": True,
+                "dataset_sha256": verified_sha256,
+                "dataset_storage_encryption": storage_encryption,
+            }
+        )
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"DICOM SEG inspection failed: {exc}",
+        ) from exc
 
 
 @router.post("/{job_id}/compute", dependencies=[Depends(require_researcher), Depends(require_mutation_lock)])
