@@ -398,6 +398,7 @@ function renderHEView() {
     root.append(
       buildEncryptCard(),
       buildDecryptCard(),
+      buildDicomSegmentInspectorCard(),
       buildDicomEncryptCard(),
       buildDicomDecryptCard(),
     );
@@ -523,6 +524,40 @@ function buildHELookupCard() {
   return card;
 }
 
+function buildDicomSegmentInspectorCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const h = document.createElement("h3");
+  h.textContent = "DICOM SEG Inspector";
+  const row = document.createElement("div");
+  row.className = "form-grid";
+  const input = document.createElement("input");
+  input.id = "dicomSegDatasetId";
+  input.placeholder = "DICOM SEG Dataset ID";
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  actions.append(button("List Segments", async () => {
+    const id = input.value.trim();
+    if (!id) return;
+    try {
+      const data = await apiJson(
+        `/he/dicom/segments/${encodeURIComponent(id)}`,
+      );
+      $("dicomSegOutput").textContent = JSON.stringify(data, null, 2);
+      const target = document.querySelector(
+        'form input[name="segmentation_dataset_id"]',
+      );
+      if (target) target.value = id;
+    } catch (error) {
+      showToast(error.message);
+    }
+  }, "primary"));
+  row.append(input, actions);
+  card.append(h, row, outputBox("dicomSegOutput"));
+  return card;
+}
+
+
 function buildDicomEncryptCard() {
   const card = document.createElement("div");
   card.className = "card";
@@ -548,6 +583,7 @@ function buildDicomEncryptCard() {
       <option value="WHOLE_VOLUME">Whole Volume</option>
       <option value="SLICE">Single Slice</option>
       <option value="ROI_BOX">ROI Box</option>
+      <option value="DICOM_SEG">DICOM SEG Mask</option>
     </select>
     <input name="slice_index" type="number" min="0" placeholder="Slice index (SLICE only)">
     <input name="slice_start" type="number" min="0" placeholder="ROI slice start">
@@ -556,7 +592,9 @@ function buildDicomEncryptCard() {
     <input name="row_end" type="number" min="1" placeholder="ROI row end (exclusive)">
     <input name="col_start" type="number" min="0" placeholder="ROI col start">
     <input name="col_end" type="number" min="1" placeholder="ROI col end (exclusive)">
-    <div class="full hint">Raw-voxel mode encrypts each selected voxel. Limit: 262,144 selected voxels. Use Slice/ROI or Block Stats for larger scans.</div>
+    <input name="segmentation_dataset_id" placeholder="DICOM SEG Dataset ID (DICOM_SEG only)">
+    <input name="segment_number" type="number" min="1" placeholder="Segment number (DICOM_SEG only)">
+    <div class="full hint">DICOM SEG selects a hospital-side binary segment, then encrypts only its source CT/MR voxels. Raw-voxel mode limit: 262,144 selected voxels; use Block Stats for larger segments.</div>
     <div class="full form-actions"><button class="primary" type="submit">Encrypt DICOM</button></div>
   `;
   const out = outputBox("dicomEncryptOutput");
@@ -593,6 +631,15 @@ function buildDicomEncryptCard() {
           roi[name] = Number(raw);
         }
         payload.roi_box = roi;
+      }
+
+      if (scope === "DICOM_SEG") {
+        const segId = String(fd.get("segmentation_dataset_id") || "").trim();
+        const segmentRaw = String(fd.get("segment_number") || "").trim();
+        if (!segId) throw new Error("DICOM SEG Dataset ID is required");
+        if (!segmentRaw) throw new Error("Segment number is required");
+        payload.segmentation_dataset_id = segId;
+        payload.segment_number = Number(segmentRaw);
       }
 
       const data = await apiJson("/he/dicom/encrypt", {
