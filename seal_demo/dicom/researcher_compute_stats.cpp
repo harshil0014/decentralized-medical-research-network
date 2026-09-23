@@ -137,7 +137,7 @@ int main()
 
     if (analysis == "SUM") {
         result = total_sum;
-    } else if (analysis == "ENERGY") {
+    } else if (analysis == "ENERGY" || analysis == "TOTAL_ENERGY") {
         result = total_sumsq;
     } else if (analysis == "MEAN") {
         result = total_sum;
@@ -148,7 +148,10 @@ int main()
             evaluator,
             scale
         );
-    } else if (analysis == "SECOND_MOMENT") {
+    } else if (
+        analysis == "SECOND_MOMENT" ||
+        analysis == "ROOT_MEAN_SQUARED"
+    ) {
         result = total_sumsq;
         multiply_scalar(
             result,
@@ -157,7 +160,10 @@ int main()
             evaluator,
             scale
         );
-    } else if (analysis == "VARIANCE") {
+    } else if (
+        analysis == "VARIANCE" ||
+        analysis == "STANDARD_DEVIATION"
+    ) {
         Ciphertext mean = total_sum;
         Ciphertext second = total_sumsq;
 

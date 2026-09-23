@@ -1,4 +1,5 @@
 #include <seal/seal.h>
+#include <algorithm>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -36,6 +37,8 @@ int main()
     }
 
     Ciphertext result;
+    Ciphertext auxiliary;
+    bool has_auxiliary = false;
     {
         ifstream in("research_exchange/result.ct", ios::binary);
         if (!in) {
@@ -43,6 +46,10 @@ int main()
             return 1;
         }
         result.load(context, in);
+        if (in.peek() != char_traits<char>::eof()) {
+            auxiliary.load(context, in);
+            has_auxiliary = true;
+        }
     }
 
     Decryptor decryptor(context, secret_key);
@@ -61,6 +68,18 @@ int main()
 
     cout << setprecision(17);
     cout << "Decrypted result: " << decoded[0] << "\n";
+    if (has_auxiliary) {
+        Plaintext auxiliary_plain;
+        vector<double> auxiliary_decoded;
+        decryptor.decrypt(auxiliary, auxiliary_plain);
+        encoder.decode(auxiliary_plain, auxiliary_decoded);
+        if (auxiliary_decoded.empty()) {
+            cerr << "Decoded auxiliary result is empty\n";
+            return 1;
+        }
+        cout << "Decrypted auxiliary result: "
+             << auxiliary_decoded[0] << "\n";
+    }
     cout << "DICOM HE hospital decryption: PASS\n";
     return 0;
 }

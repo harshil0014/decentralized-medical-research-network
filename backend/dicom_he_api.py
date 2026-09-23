@@ -8,6 +8,7 @@ from backend.runtime_security import require_mutation_lock
 from backend.storage_crypto import decrypt_bytes, is_encrypted_dataset
 from backend.he_service import fetch_ipfs_dataset_bytes, unpin_ipfs, verify_dataset_bytes
 from backend.dicom_he_service import (
+    MAX_RAW_VOXELS,
     SUPPORTED_ANALYSES,
     SUPPORTED_HE_MODES,
     SUPPORTED_SCOPES,
@@ -27,6 +28,27 @@ from backend.dicom_he_service import (
 )
 
 router = APIRouter(prefix="/he/dicom", tags=["DICOM Homomorphic Encryption"])
+
+
+@router.get("/capabilities", dependencies=[Depends(require_authenticated)])
+def dicom_he_capabilities():
+    return {
+        "engine": "Microsoft SEAL 4.4 CKKS",
+        "analyses": sorted(SUPPORTED_ANALYSES),
+        "scopes": sorted(SUPPORTED_SCOPES),
+        "he_modes": sorted(SUPPORTED_HE_MODES),
+        "raw_voxel_limit": MAX_RAW_VOXELS,
+        "raw_voxel_only": [
+            "CENTRAL_MOMENT_3",
+            "CENTRAL_MOMENT_4",
+            "SKEWNESS",
+            "KURTOSIS",
+        ],
+        "privacy": {
+            "researcher_receives_plaintext_pixels": False,
+            "researcher_receives_he_secret_key": False,
+        },
+    }
 
 
 class DicomROIBox(BaseModel):

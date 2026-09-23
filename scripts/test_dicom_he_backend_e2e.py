@@ -191,11 +191,28 @@ approve = client.post(
 assert approve.status_code == 200, approve.text
 assert approve.json()["status"] == "APPROVED"
 
+capabilities = client.get("/he/dicom/capabilities", headers=researcher)
+assert capabilities.status_code == 200, capabilities.text
+assert capabilities.json()["engine"] == "Microsoft SEAL 4.4 CKKS"
+assert "SKEWNESS" in capabilities.json()["analyses"]
+assert "KURTOSIS" in capabilities.json()["analyses"]
+assert capabilities.json()["privacy"]["researcher_receives_he_secret_key"] is False
+
 # Stored pixels 0..15 become CT values -1024..-1009 HU.
 expected = np.arange(16, dtype=np.float64) - 1024.0
+expected_mean = float(expected.mean())
+expected_variance = float(expected.var())
+expected_centered = expected - expected_mean
+expected_m3 = float(np.mean(expected_centered ** 3))
+expected_m4 = float(np.mean(expected_centered ** 4))
 references = {
-    "MEAN": float(expected.mean()),
-    "VARIANCE": float(expected.var()),
+    "MEAN": expected_mean,
+    "VARIANCE": expected_variance,
+    "STANDARD_DEVIATION": float(np.sqrt(expected_variance)),
+    "ROOT_MEAN_SQUARED": float(np.sqrt(np.mean(expected ** 2))),
+    "TOTAL_ENERGY": float(np.sum(expected ** 2)),
+    "SKEWNESS": expected_m3 / (expected_variance ** 1.5),
+    "KURTOSIS": expected_m4 / (expected_variance ** 2),
 }
 
 for analysis, reference in references.items():

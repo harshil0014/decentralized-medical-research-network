@@ -570,10 +570,17 @@ function buildDicomEncryptCard() {
     <input name="request_id" placeholder="Approved Request ID" required>
     <select name="analysis" title="Analysis">
       <option value="MEAN">Mean</option>
-      <option value="VARIANCE">Variance</option>
-      <option value="ENERGY">Energy</option>
-      <option value="SECOND_MOMENT">Second Moment</option>
       <option value="SUM">Sum</option>
+      <option value="VARIANCE">Variance</option>
+      <option value="STANDARD_DEVIATION">Standard Deviation</option>
+      <option value="ENERGY">Energy</option>
+      <option value="TOTAL_ENERGY">Total Energy</option>
+      <option value="SECOND_MOMENT">Second Moment</option>
+      <option value="ROOT_MEAN_SQUARED">Root Mean Squared</option>
+      <option value="SKEWNESS">Skewness</option>
+      <option value="KURTOSIS">Kurtosis</option>
+      <option value="CENTRAL_MOMENT_3">Central Moment 3</option>
+      <option value="CENTRAL_MOMENT_4">Central Moment 4</option>
     </select>
     <select name="he_mode" title="HE mode">
       <option value="RAW_VOXELS">Raw Voxels (CKKS)</option>

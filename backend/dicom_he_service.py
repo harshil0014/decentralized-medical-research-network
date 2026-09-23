@@ -44,8 +44,15 @@ SUPPORTED_ANALYSES = {
     "SUM",
     "MEAN",
     "ENERGY",
+    "TOTAL_ENERGY",
     "SECOND_MOMENT",
+    "ROOT_MEAN_SQUARED",
     "VARIANCE",
+    "STANDARD_DEVIATION",
+    "SKEWNESS",
+    "KURTOSIS",
+    "CENTRAL_MOMENT_3",
+    "CENTRAL_MOMENT_4",
 }
 SUPPORTED_SCOPES = {"WHOLE_VOLUME", "SLICE", "ROI_BOX", "DICOM_SEG"}
 SUPPORTED_MODALITIES = {"CT", "MR"}
@@ -210,6 +217,111 @@ def _dataset_sort_key(ds: pydicom.Dataset) -> tuple[float, float]:
         return (1.0, float(getattr(ds, "InstanceNumber", 0)))
     except (TypeError, ValueError):
         return (1.0, 0.0)
+
+
+def _voxel_spacing_mm(
+    datasets: list[pydicom.Dataset],
+) -> tuple[float, float, float]:
+    ordered = sorted(datasets, key=_dataset_sort_key)
+    first = ordered[0]
+
+    row_spacing = 1.0
+    col_spacing = 1.0
+    pixel_spacing = getattr(first, "PixelSpacing", None)
+    if pixel_spacing and len(pixel_spacing) >= 2:
+        try:
+            row_spacing = abs(float(pixel_spacing[0]))
+            col_spacing = abs(float(pixel_spacing[1]))
+        except (TypeError, ValueError):
+            row_spacing = 1.0
+            col_spacing = 1.0
+
+    slice_spacing: float | None = None
+    if len(ordered) > 1:
+        positions: list[np.ndarray] = []
+        for ds in ordered:
+            position = getattr(ds, "ImagePositionPatient", None)
+            if not position or len(position) < 3:
+                positions = []
+                break
+            try:
+                positions.append(
+                    np.asarray(
+                        [float(position[0]), float(position[1]), float(position[2])],
+                        dtype=np.float64,
+                    )
+                )
+            except (TypeError, ValueError):
+                positions = []
+                break
+
+        if len(positions) >= 2:
+            orientation = getattr(first, "ImageOrientationPatient", None)
+            projected: list[float]
+            if orientation and len(orientation) >= 6:
+                try:
+                    row_direction = np.asarray(
+                        [float(x) for x in orientation[:3]],
+                        dtype=np.float64,
+                    )
+                    column_direction = np.asarray(
+                        [float(x) for x in orientation[3:6]],
+                        dtype=np.float64,
+                    )
+                    normal = np.cross(row_direction, column_direction)
+                    norm = float(np.linalg.norm(normal))
+                    if norm > 0:
+                        normal /= norm
+                        projected = [
+                            float(np.dot(position, normal))
+                            for position in positions
+                        ]
+                    else:
+                        projected = [
+                            float(np.linalg.norm(position - positions[0]))
+                            for position in positions
+                        ]
+                except (TypeError, ValueError):
+                    projected = [
+                        float(np.linalg.norm(position - positions[0]))
+                        for position in positions
+                    ]
+            else:
+                projected = [
+                    float(np.linalg.norm(position - positions[0]))
+                    for position in positions
+                ]
+
+            projected = sorted(projected)
+            diffs = [
+                abs(projected[index + 1] - projected[index])
+                for index in range(len(projected) - 1)
+                if abs(projected[index + 1] - projected[index]) > 1e-9
+            ]
+            if diffs:
+                slice_spacing = float(np.median(diffs))
+
+    if slice_spacing is None:
+        for keyword in ("SpacingBetweenSlices", "SliceThickness"):
+            value = getattr(first, keyword, None)
+            if value not in (None, ""):
+                try:
+                    candidate = abs(float(value))
+                except (TypeError, ValueError):
+                    continue
+                if candidate > 0:
+                    slice_spacing = candidate
+                    break
+
+    if slice_spacing is None or slice_spacing <= 0:
+        slice_spacing = 1.0
+
+    if row_spacing <= 0:
+        row_spacing = 1.0
+    if col_spacing <= 0:
+        col_spacing = 1.0
+
+    return (slice_spacing, row_spacing, col_spacing)
 
 
 def _fallback_volume(
@@ -431,6 +543,8 @@ def extract_dicom_seg_analysis_values(
         getattr(description, "SegmentLabel", f"Segment {requested}")
     )
     unit = "HU" if modality == "CT" else "relative_intensity"
+    voxel_spacing_mm = _voxel_spacing_mm(source_datasets)
+    voxel_volume_mm3 = float(np.prod(voxel_spacing_mm))
 
     metadata = {
         "modality": modality,
@@ -447,6 +561,9 @@ def extract_dicom_seg_analysis_values(
         "segment_label": label,
         "segment_voxel_count": voxel_count,
         "segment_mask_shape": [int(x) for x in mask.shape],
+        "voxel_spacing_mm": [float(x) for x in voxel_spacing_mm],
+        "voxel_volume_mm3": voxel_volume_mm3,
+        "segment_physical_volume_mm3": float(voxel_count) * voxel_volume_mm3,
         "segment_property_category": _segment_code_meaning(
             description,
             "SegmentedPropertyCategoryCodeSequence",
@@ -551,6 +668,8 @@ def extract_dicom_analysis_values(
         raise ValueError("Selected DICOM region is too small for analysis")
 
     unit = "HU" if modality == "CT" else "relative_intensity"
+    voxel_spacing_mm = _voxel_spacing_mm(datasets)
+    voxel_volume_mm3 = float(np.prod(voxel_spacing_mm))
 
     metadata = {
         "modality": modality,
@@ -561,6 +680,8 @@ def extract_dicom_analysis_values(
         "original_shape": list(original_shape),
         "selected_shape": [int(x) for x in selected.shape],
         "voxel_count": int(selected.size),
+        "voxel_spacing_mm": [float(x) for x in voxel_spacing_mm],
+        "voxel_volume_mm3": voxel_volume_mm3,
         "dicom_loader": loader,
     }
 
@@ -628,8 +749,16 @@ def build_raw_voxel_input(
         raise ValueError("DICOM values contain non-finite numbers")
 
     center_offset = 0.0
-    if analysis == "VARIANCE":
+    if analysis in {"VARIANCE", "STANDARD_DEVIATION"}:
         center_offset = float((np.min(flat) + np.max(flat)) / 2.0)
+        flat = flat - center_offset
+    elif analysis in {
+        "SKEWNESS",
+        "KURTOSIS",
+        "CENTRAL_MOMENT_3",
+        "CENTRAL_MOMENT_4",
+    }:
+        center_offset = float(np.mean(flat, dtype=np.float64))
         flat = flat - center_offset
 
     normalization = _normalization_scale(flat)
@@ -683,6 +812,18 @@ def create_encrypted_dicom_job(
             "he_mode must be RAW_VOXELS or BLOCK_STATS"
         )
 
+    if normalized_mode == "BLOCK_STATS" and normalized_analysis in {
+        "SKEWNESS",
+        "KURTOSIS",
+        "CENTRAL_MOMENT_3",
+        "CENTRAL_MOMENT_4",
+    }:
+        raise ValueError(
+            normalized_analysis
+            + " requires RAW_VOXELS so higher moments are computed "
+              "by the researcher over encrypted voxels"
+        )
+
     job_id = uuid.uuid4().hex
     job = _job_dir(job_id)
     sample_input = job / "sample_input"
@@ -709,7 +850,7 @@ def create_encrypted_dicom_job(
             chunk_count = int(count_path.read_text(encoding="utf-8").strip())
         else:
             center_offset = 0.0
-            if normalized_analysis == "VARIANCE":
+            if normalized_analysis in {"VARIANCE", "STANDARD_DEVIATION"}:
                 raw = np.asarray(values, dtype=np.float64).reshape(-1)
                 center_offset = float(
                     (np.min(raw) + np.max(raw)) / 2.0
@@ -873,9 +1014,25 @@ def compute_encrypted_dicom_analysis(job_id: str) -> dict:
 def _result_unit(analysis: str, base_unit: str) -> str:
     if analysis == "SUM":
         return f"{base_unit}*voxel"
+    if analysis == "TOTAL_ENERGY":
+        return f"{base_unit}^2*mm^3"
     if analysis in {"ENERGY", "SECOND_MOMENT", "VARIANCE"}:
         return f"{base_unit}^2"
+    if analysis == "CENTRAL_MOMENT_3":
+        return f"{base_unit}^3"
+    if analysis == "CENTRAL_MOMENT_4":
+        return f"{base_unit}^4"
+    if analysis in {"SKEWNESS", "KURTOSIS"}:
+        return "dimensionless"
     return base_unit
+
+
+def _nonnegative_ckks(value: float, label: str) -> float:
+    if value >= 0:
+        return value
+    if abs(value) <= 1e-6:
+        return 0.0
+    raise RuntimeError(f"{label} became negative after CKKS evaluation: {value}")
 
 
 def decrypt_dicom_analysis(job_id: str) -> dict:
@@ -910,17 +1067,84 @@ def decrypt_dicom_analysis(job_id: str) -> dict:
             "Could not parse decrypted DICOM HE result"
         )
 
+    auxiliary_match = re.search(
+        r"Decrypted auxiliary result:\s*"
+        r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+        r"(?:[eE][-+]?\d+)?)",
+        output,
+    )
+    normalized_auxiliary = (
+        float(auxiliary_match.group(1))
+        if auxiliary_match
+        else None
+    )
+
     normalized_value = float(match.group(1))
     analysis = str(metadata["analysis"])
     scale = float(metadata["normalization_scale"])
+    voxel_count = int(metadata["voxel_count"])
 
     if analysis in {"SUM", "MEAN"}:
         value = normalized_value * scale
-    else:
+    elif analysis in {"ENERGY", "SECOND_MOMENT"}:
         value = normalized_value * scale * scale
-
-    if analysis == "VARIANCE" and value < 0 and abs(value) < 1e-7:
-        value = 0.0
+    elif analysis == "TOTAL_ENERGY":
+        value = (
+            normalized_value
+            * scale
+            * scale
+            * float(metadata.get("voxel_volume_mm3", 1.0))
+        )
+    elif analysis == "VARIANCE":
+        normalized_variance = _nonnegative_ckks(
+            normalized_value,
+            "Variance",
+        )
+        value = normalized_variance * scale * scale
+    elif analysis == "STANDARD_DEVIATION":
+        normalized_variance = _nonnegative_ckks(
+            normalized_value,
+            "Variance",
+        )
+        value = math.sqrt(normalized_variance) * scale
+    elif analysis == "ROOT_MEAN_SQUARED":
+        normalized_second = _nonnegative_ckks(
+            normalized_value,
+            "Second moment",
+        )
+        value = math.sqrt(normalized_second) * scale
+    elif analysis == "CENTRAL_MOMENT_3":
+        value = (
+            normalized_value
+            / float(voxel_count)
+            * (scale ** 3)
+        )
+    elif analysis == "CENTRAL_MOMENT_4":
+        value = (
+            normalized_value
+            / float(voxel_count)
+            * (scale ** 4)
+        )
+    elif analysis in {"SKEWNESS", "KURTOSIS"}:
+        if normalized_auxiliary is None:
+            raise RuntimeError(
+                f"{analysis} requires two encrypted central moments"
+            )
+        m2 = normalized_value / float(voxel_count)
+        m2 = _nonnegative_ckks(m2, "Second central moment")
+        if m2 <= 1e-18:
+            value = 0.0
+        elif analysis == "SKEWNESS":
+            m3 = normalized_auxiliary / float(voxel_count)
+            value = m3 / (m2 ** 1.5)
+        else:
+            m4 = normalized_auxiliary / float(voxel_count)
+            m4 = _nonnegative_ckks(m4, "Fourth central moment")
+            value = m4 / (m2 * m2)
+    else:
+        raise RuntimeError(
+            f"Unsupported decrypted DICOM HE analysis: {analysis}"
+        )
 
     return {
         "job_id": job_id,
@@ -942,14 +1166,18 @@ def decrypt_dicom_analysis(job_id: str) -> dict:
         "segment_number": metadata.get("segment_number"),
         "segment_label": metadata.get("segment_label"),
         "segment_voxel_count": metadata.get("segment_voxel_count"),
+        "segment_physical_volume_mm3": metadata.get(
+            "segment_physical_volume_mm3"
+        ),
         "selected_shape": metadata["selected_shape"],
         "voxel_count": metadata["voxel_count"],
+        "voxel_spacing_mm": metadata.get("voxel_spacing_mm"),
+        "voxel_volume_mm3": metadata.get("voxel_volume_mm3"),
         "researcher_has_plaintext_pixels": False,
         "researcher_has_encrypted_raw_voxels": bool(
             metadata.get("researcher_has_encrypted_raw_voxels", False)
         ),
     }
-
 
 def cleanup_dicom_he_job(job_id: str) -> None:
     shutil.rmtree(

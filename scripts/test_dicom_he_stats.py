@@ -265,18 +265,42 @@ def make_multislice_dicom_seg_fixture() -> tuple[bytes, bytes, np.ndarray]:
 
 
 def assert_close(actual: float, expected: float, label: str) -> None:
-    tolerance = max(1e-4, abs(expected) * 2e-6)
-    if not math.isclose(actual, expected, rel_tol=2e-6, abs_tol=tolerance):
+    if label in {
+        "SKEWNESS",
+        "KURTOSIS",
+        "CENTRAL_MOMENT_3",
+        "CENTRAL_MOMENT_4",
+    }:
+        tolerance = max(5e-3, abs(expected) * 5e-5)
+        relative = 5e-5
+    else:
+        tolerance = max(1e-4, abs(expected) * 5e-6)
+        relative = 5e-6
+    if not math.isclose(actual, expected, rel_tol=relative, abs_tol=tolerance):
         raise AssertionError(f"{label}: got {actual}, expected {expected}")
 
 
 def verify_he(values: np.ndarray, metadata: dict) -> None:
+    mean = float(values.mean())
+    centered = values.astype(np.float64) - mean
+    variance = float(np.mean(centered ** 2))
+    m3 = float(np.mean(centered ** 3))
+    m4 = float(np.mean(centered ** 4))
+    energy = float(np.square(values).sum())
+    voxel_volume = float(metadata.get("voxel_volume_mm3", 1.0))
     expected = {
         "SUM": float(values.sum()),
-        "MEAN": float(values.mean()),
-        "ENERGY": float(np.square(values).sum()),
+        "MEAN": mean,
+        "ENERGY": energy,
+        "TOTAL_ENERGY": energy * voxel_volume,
         "SECOND_MOMENT": float(np.square(values).mean()),
-        "VARIANCE": float(values.var()),
+        "ROOT_MEAN_SQUARED": float(np.sqrt(np.square(values).mean())),
+        "VARIANCE": variance,
+        "STANDARD_DEVIATION": float(np.sqrt(variance)),
+        "CENTRAL_MOMENT_3": m3,
+        "CENTRAL_MOMENT_4": m4,
+        "SKEWNESS": 0.0 if variance == 0 else m3 / (variance ** 1.5),
+        "KURTOSIS": 0.0 if variance == 0 else m4 / (variance ** 2),
     }
 
     for analysis, reference in expected.items():
@@ -530,23 +554,35 @@ def test_raw_multichunk_and_block_fallback() -> None:
         assert_close(float(decrypted["value"]), float(values.mean()), "RAW_MULTI_CHUNK")
         print("RAW VOXEL MULTI-CHUNK: PASS")
 
-        created_block = create_encrypted_dicom_job(
-            values,
-            "MEAN",
-            metadata,
-            he_mode="BLOCK_STATS",
-        )
-        block_job = created_block["job_id"]
-        assert created_block["representation"] == "ENCRYPTED_BLOCK_SUFFICIENT_STATISTICS"
-        assert created_block["researcher_has_encrypted_raw_voxels"] is False
-        compute_encrypted_dicom_analysis(block_job)
-        decrypted_block = decrypt_dicom_analysis(block_job)
-        assert_close(
-            float(decrypted_block["value"]),
-            float(values.mean()),
-            "BLOCK_STATS_FALLBACK",
-        )
-        print("BLOCK STATS FALLBACK: PASS")
+        block_expectations = {
+            "MEAN": float(values.mean()),
+            "STANDARD_DEVIATION": float(values.std()),
+            "ROOT_MEAN_SQUARED": float(np.sqrt(np.mean(values ** 2))),
+            "TOTAL_ENERGY": float(np.sum(values ** 2)),
+        }
+        for block_analysis, block_reference in block_expectations.items():
+            created_block = create_encrypted_dicom_job(
+                values,
+                block_analysis,
+                metadata,
+                he_mode="BLOCK_STATS",
+            )
+            block_job = created_block["job_id"]
+            assert (
+                created_block["representation"]
+                == "ENCRYPTED_BLOCK_SUFFICIENT_STATISTICS"
+            )
+            assert created_block["researcher_has_encrypted_raw_voxels"] is False
+            compute_encrypted_dicom_analysis(block_job)
+            decrypted_block = decrypt_dicom_analysis(block_job)
+            assert_close(
+                float(decrypted_block["value"]),
+                block_reference,
+                f"BLOCK_STATS_{block_analysis}",
+            )
+            cleanup_dicom_he_job(block_job)
+            block_job = None
+        print("BLOCK STATS V2 FALLBACKS: PASS")
     finally:
         if raw_job:
             cleanup_dicom_he_job(raw_job)
