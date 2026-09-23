@@ -113,12 +113,18 @@ def verify_he(values: np.ndarray, metadata: dict) -> None:
         try:
             created = create_encrypted_dicom_job(values, analysis, metadata)
             job_id = created["job_id"]
+            assert created["he_mode"] == "RAW_VOXELS"
+            assert created["representation"] == "ENCRYPTED_RAW_VOXELS"
+            assert created["researcher_has_plaintext_pixels"] is False
             assert created["researcher_has_raw_pixels"] is False
+            assert created["researcher_has_encrypted_raw_voxels"] is True
             assert created["researcher_has_secret_key"] is False
 
             computed = compute_encrypted_dicom_analysis(job_id)
             assert computed["result_is_ciphertext"] is True
+            assert computed["researcher_has_plaintext_pixels"] is False
             assert computed["researcher_has_raw_pixels"] is False
+            assert computed["researcher_has_encrypted_raw_voxels"] is True
             assert computed["researcher_has_secret_key"] is False
 
             decrypted = decrypt_dicom_analysis(job_id)
@@ -156,7 +162,26 @@ def test_ct_series() -> None:
     )
     assert np.array_equal(slice_values, expected[4:8])
     assert slice_meta["slice_index"] == 1
-    print("CT SERIES + SLICE EXTRACTION: PASS")
+
+    roi = {
+        "slice_start": 1,
+        "slice_end": 3,
+        "row_start": 0,
+        "row_end": 2,
+        "col_start": 1,
+        "col_end": 2,
+    }
+    roi_values, roi_meta = extract_dicom_analysis_values(
+        data,
+        scope="ROI_BOX",
+        roi_box=roi,
+    )
+    expected_roi = np.array([-990.0, -986.0, -982.0, -978.0])
+    assert np.array_equal(roi_values, expected_roi)
+    assert roi_meta["roi_box"] == roi
+    assert roi_meta["selected_shape"] == [2, 2, 1]
+
+    print("CT SERIES + SLICE + ROI EXTRACTION: PASS")
     verify_he(values, metadata)
 
 
@@ -196,10 +221,73 @@ def test_privacy_guards() -> None:
     print("BURNED-IN ANNOTATION GUARD: PASS")
 
 
+def test_raw_multichunk_and_block_fallback() -> None:
+    values = np.linspace(-1000.0, 1000.0, 5000, dtype=np.float64)
+    metadata = {
+        "modality": "CT",
+        "unit": "HU",
+        "scope": "ROI_BOX",
+        "slice_index": None,
+        "roi_box": {
+            "slice_start": 0,
+            "slice_end": 1,
+            "row_start": 0,
+            "row_end": 50,
+            "col_start": 0,
+            "col_end": 100,
+        },
+        "original_shape": [1, 50, 100],
+        "selected_shape": [1, 50, 100],
+        "voxel_count": 5000,
+        "dicom_loader": "synthetic",
+    }
+
+    raw_job = None
+    block_job = None
+    try:
+        created = create_encrypted_dicom_job(
+            values,
+            "MEAN",
+            metadata,
+            he_mode="RAW_VOXELS",
+        )
+        raw_job = created["job_id"]
+        assert created["chunk_count"] == 2
+        assert created["researcher_has_encrypted_raw_voxels"] is True
+        compute_encrypted_dicom_analysis(raw_job)
+        decrypted = decrypt_dicom_analysis(raw_job)
+        assert_close(float(decrypted["value"]), float(values.mean()), "RAW_MULTI_CHUNK")
+        print("RAW VOXEL MULTI-CHUNK: PASS")
+
+        created_block = create_encrypted_dicom_job(
+            values,
+            "MEAN",
+            metadata,
+            he_mode="BLOCK_STATS",
+        )
+        block_job = created_block["job_id"]
+        assert created_block["representation"] == "ENCRYPTED_BLOCK_SUFFICIENT_STATISTICS"
+        assert created_block["researcher_has_encrypted_raw_voxels"] is False
+        compute_encrypted_dicom_analysis(block_job)
+        decrypted_block = decrypt_dicom_analysis(block_job)
+        assert_close(
+            float(decrypted_block["value"]),
+            float(values.mean()),
+            "BLOCK_STATS_FALLBACK",
+        )
+        print("BLOCK STATS FALLBACK: PASS")
+    finally:
+        if raw_job:
+            cleanup_dicom_he_job(raw_job)
+        if block_job:
+            cleanup_dicom_he_job(block_job)
+
+
 def main() -> None:
     test_ct_series()
     test_mr_series()
     test_privacy_guards()
+    test_raw_multichunk_and_block_fallback()
     print("DICOM HE STATISTICS: PASS")
 
 

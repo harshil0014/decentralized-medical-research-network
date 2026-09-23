@@ -31,6 +31,8 @@ BUILD_DIR = PROJECT_ROOT / "seal_demo" / "build"
 
 HOSPITAL_ENCRYPT = BUILD_DIR / "dicom_hospital_encrypt_stats"
 RESEARCHER_COMPUTE = BUILD_DIR / "dicom_researcher_compute_stats"
+RAW_HOSPITAL_ENCRYPT = BUILD_DIR / "dicom_hospital_encrypt_raw"
+RAW_RESEARCHER_COMPUTE = BUILD_DIR / "dicom_researcher_compute_raw"
 HOSPITAL_DECRYPT = BUILD_DIR / "dicom_hospital_decrypt_stats"
 
 RUNTIME_ROOT = Path("/tmp/medical-he-jobs")
@@ -45,12 +47,14 @@ SUPPORTED_ANALYSES = {
     "SECOND_MOMENT",
     "VARIANCE",
 }
-SUPPORTED_SCOPES = {"WHOLE_VOLUME", "SLICE"}
+SUPPORTED_SCOPES = {"WHOLE_VOLUME", "SLICE", "ROI_BOX"}
 SUPPORTED_MODALITIES = {"CT", "MR"}
+SUPPORTED_HE_MODES = {"RAW_VOXELS", "BLOCK_STATS"}
 
 MAX_DICOM_FILES = 5000
 MAX_UNCOMPRESSED_ZIP = 2 * 1024 * 1024 * 1024
 MAX_VOXELS = 150_000_000
+MAX_RAW_VOXELS = 262_144
 MAX_STAT_BLOCKS = 2048
 
 
@@ -293,6 +297,7 @@ def extract_dicom_analysis_values(
     data: bytes,
     scope: str = "WHOLE_VOLUME",
     slice_index: int | None = None,
+    roi_box: dict | None = None,
 ) -> tuple[np.ndarray, dict]:
     datasets = _read_dicom_datasets(data)
     modality = _validate_dicom_series(datasets)
@@ -315,13 +320,14 @@ def extract_dicom_analysis_values(
     normalized_scope = scope.strip().upper()
     if normalized_scope not in SUPPORTED_SCOPES:
         raise ValueError(
-            "scope must be WHOLE_VOLUME or SLICE"
+            "scope must be WHOLE_VOLUME, SLICE, or ROI_BOX"
         )
 
     original_shape = tuple(int(x) for x in volume.shape)
 
     selected = volume
     selected_slice: int | None = None
+    normalized_roi: dict | None = None
 
     if normalized_scope == "SLICE":
         if slice_index is None:
@@ -331,10 +337,46 @@ def extract_dicom_analysis_values(
         selected_slice = int(slice_index)
         selected = volume[selected_slice:selected_slice + 1, :, :]
 
+    elif normalized_scope == "ROI_BOX":
+        if not isinstance(roi_box, dict):
+            raise ValueError("roi_box is required for ROI_BOX scope")
+
+        names = (
+            "slice_start",
+            "slice_end",
+            "row_start",
+            "row_end",
+            "col_start",
+            "col_end",
+        )
+        try:
+            values = {name: int(roi_box[name]) for name in names}
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "ROI box requires integer slice/row/col start and end values"
+            ) from exc
+
+        s0, s1 = values["slice_start"], values["slice_end"]
+        r0, r1 = values["row_start"], values["row_end"]
+        c0, c1 = values["col_start"], values["col_end"]
+
+        if not (0 <= s0 < s1 <= volume.shape[0]):
+            raise ValueError("ROI slice range is outside the DICOM volume")
+        if not (0 <= r0 < r1 <= volume.shape[1]):
+            raise ValueError("ROI row range is outside the DICOM volume")
+        if not (0 <= c0 < c1 <= volume.shape[2]):
+            raise ValueError("ROI column range is outside the DICOM volume")
+
+        normalized_roi = values
+        selected = volume[s0:s1, r0:r1, c0:c1]
+
     selected = np.ascontiguousarray(
         selected,
         dtype=np.float64,
     )
+
+    if selected.size < 2:
+        raise ValueError("Selected DICOM region is too small for analysis")
 
     unit = "HU" if modality == "CT" else "relative_intensity"
 
@@ -343,6 +385,7 @@ def extract_dicom_analysis_values(
         "unit": unit,
         "scope": normalized_scope,
         "slice_index": selected_slice,
+        "roi_box": normalized_roi,
         "original_shape": list(original_shape),
         "selected_shape": [int(x) for x in selected.shape],
         "voxel_count": int(selected.size),
@@ -397,6 +440,31 @@ def build_block_statistics(
     return rows, normalization
 
 
+def build_raw_voxel_input(
+    values: np.ndarray,
+    analysis: str,
+) -> tuple[np.ndarray, float, float]:
+    flat = np.asarray(values, dtype=np.float64).reshape(-1)
+    if flat.size < 2:
+        raise ValueError("At least two DICOM values are required")
+    if flat.size > MAX_RAW_VOXELS:
+        raise ValueError(
+            f"RAW_VOXELS supports at most {MAX_RAW_VOXELS:,} selected voxels; "
+            "use SLICE/ROI_BOX or BLOCK_STATS for larger volumes"
+        )
+    if not np.isfinite(flat).all():
+        raise ValueError("DICOM values contain non-finite numbers")
+
+    center_offset = 0.0
+    if analysis == "VARIANCE":
+        center_offset = float((np.min(flat) + np.max(flat)) / 2.0)
+        flat = flat - center_offset
+
+    normalization = _normalization_scale(flat)
+    normalized = np.ascontiguousarray(flat / normalization, dtype="<f8")
+    return normalized, normalization, center_offset
+
+
 def _manifest_hash(exchange: Path) -> str:
     files = [
         path
@@ -428,6 +496,7 @@ def create_encrypted_dicom_job(
     values: np.ndarray,
     analysis: str,
     metadata: dict,
+    he_mode: str = "RAW_VOXELS",
 ) -> dict:
     normalized_analysis = analysis.strip().upper()
     if normalized_analysis not in SUPPORTED_ANALYSES:
@@ -436,35 +505,60 @@ def create_encrypted_dicom_job(
             + normalized_analysis
         )
 
-    # Variance computed as E[x^2] - E[x]^2 can lose CKKS precision
-    # when the mean is large relative to the spread (common for CT HU).
-    # Centering is variance-invariant and keeps the encrypted arithmetic stable.
-    center_offset = 0.0
-    if normalized_analysis == "VARIANCE":
-        raw = np.asarray(values, dtype=np.float64).reshape(-1)
-        center_offset = float((np.min(raw) + np.max(raw)) / 2.0)
-
-    rows, normalization = build_block_statistics(
-        values,
-        center_offset=center_offset,
-    )
+    normalized_mode = he_mode.strip().upper()
+    if normalized_mode not in SUPPORTED_HE_MODES:
+        raise ValueError(
+            "he_mode must be RAW_VOXELS or BLOCK_STATS"
+        )
 
     job_id = uuid.uuid4().hex
     job = _job_dir(job_id)
     sample_input = job / "sample_input"
     sample_input.mkdir(parents=True)
 
-    stats_path = sample_input / "dicom_stats.csv"
-    stats_path.write_text(
-        "".join(
-            f"{block_sum:.17g},{block_sumsq:.17g}\n"
-            for block_sum, block_sumsq in rows
-        ),
-        encoding="utf-8",
-    )
+    representation: str
+    normalization: float
+    center_offset: float
+    block_count: int | None = None
+    chunk_count: int | None = None
 
     try:
-        _run(HOSPITAL_ENCRYPT, job)
+        if normalized_mode == "RAW_VOXELS":
+            normalized, normalization, center_offset = build_raw_voxel_input(
+                values,
+                normalized_analysis,
+            )
+            normalized.tofile(sample_input / "raw_voxels.f64")
+            _run(RAW_HOSPITAL_ENCRYPT, job, timeout=300)
+            representation = "ENCRYPTED_RAW_VOXELS"
+            count_path = job / "research_exchange" / "chunk_count.txt"
+            if not count_path.exists():
+                raise RuntimeError("Raw-voxel CKKS chunk count is missing")
+            chunk_count = int(count_path.read_text(encoding="utf-8").strip())
+        else:
+            center_offset = 0.0
+            if normalized_analysis == "VARIANCE":
+                raw = np.asarray(values, dtype=np.float64).reshape(-1)
+                center_offset = float(
+                    (np.min(raw) + np.max(raw)) / 2.0
+                )
+
+            rows, normalization = build_block_statistics(
+                values,
+                center_offset=center_offset,
+            )
+            block_count = len(rows)
+            stats_path = sample_input / "dicom_stats.csv"
+            stats_path.write_text(
+                "".join(
+                    f"{block_sum:.17g},{block_sumsq:.17g}\n"
+                    for block_sum, block_sumsq in rows
+                ),
+                encoding="utf-8",
+            )
+            _run(HOSPITAL_ENCRYPT, job)
+            representation = "ENCRYPTED_BLOCK_SUFFICIENT_STATISTICS"
+
     except Exception:
         shutil.rmtree(job, ignore_errors=True)
         raise
@@ -493,11 +587,15 @@ def create_encrypted_dicom_job(
     public_metadata.update(
         {
             "analysis": normalized_analysis,
-            "representation": (
-                "ENCRYPTED_BLOCK_SUFFICIENT_STATISTICS"
-            ),
-            "block_count": len(rows),
+            "he_mode": normalized_mode,
+            "representation": representation,
+            "block_count": block_count,
+            "chunk_count": chunk_count,
+            "researcher_has_plaintext_pixels": False,
             "researcher_has_raw_pixels": False,
+            "researcher_has_encrypted_raw_voxels": (
+                normalized_mode == "RAW_VOXELS"
+            ),
             "researcher_has_secret_key": False,
         }
     )
@@ -531,12 +629,16 @@ def create_encrypted_dicom_job(
         "state": "ENCRYPTED",
         "analysis": normalized_analysis,
         "voxel_count": voxel_count,
-        "block_count": len(rows),
+        "block_count": block_count,
+        "chunk_count": chunk_count,
         "ciphertext_manifest_sha256": _manifest_hash(exchange),
-        "representation": (
-            "ENCRYPTED_BLOCK_SUFFICIENT_STATISTICS"
-        ),
+        "he_mode": normalized_mode,
+        "representation": representation,
+        "researcher_has_plaintext_pixels": False,
         "researcher_has_raw_pixels": False,
+        "researcher_has_encrypted_raw_voxels": (
+            normalized_mode == "RAW_VOXELS"
+        ),
         "researcher_has_secret_key": False,
         **metadata,
     }
@@ -561,8 +663,17 @@ def compute_encrypted_dicom_analysis(job_id: str) -> dict:
     analysis = (
         exchange / "analysis.txt"
     ).read_text(encoding="utf-8").strip()
+    metadata = json.loads(
+        (exchange / "public_metadata.json").read_text(encoding="utf-8")
+    )
+    representation = str(metadata.get("representation") or "")
 
-    _run(RESEARCHER_COMPUTE, job)
+    if representation == "ENCRYPTED_RAW_VOXELS":
+        _run(RAW_RESEARCHER_COMPUTE, job, timeout=600)
+    elif representation == "ENCRYPTED_BLOCK_SUFFICIENT_STATISTICS":
+        _run(RESEARCHER_COMPUTE, job)
+    else:
+        raise RuntimeError("Unknown DICOM HE representation")
 
     result = exchange / "result.ct"
     if not result.exists():
@@ -576,7 +687,13 @@ def compute_encrypted_dicom_analysis(job_id: str) -> dict:
         "state": "ENCRYPTED_RESULT_READY",
         "result_sha256": _sha256_file(result),
         "result_is_ciphertext": True,
+        "he_mode": metadata.get("he_mode", "BLOCK_STATS"),
+        "representation": representation,
+        "researcher_has_plaintext_pixels": False,
         "researcher_has_raw_pixels": False,
+        "researcher_has_encrypted_raw_voxels": bool(
+            metadata.get("researcher_has_encrypted_raw_voxels", False)
+        ),
         "researcher_has_secret_key": False,
     }
 
@@ -643,12 +760,18 @@ def decrypt_dicom_analysis(job_id: str) -> dict:
             str(metadata["unit"]),
         ),
         "ckks_approximate": True,
+        "he_mode": metadata.get("he_mode", "BLOCK_STATS"),
         "representation": metadata["representation"],
         "modality": metadata["modality"],
         "scope": metadata["scope"],
         "slice_index": metadata["slice_index"],
+        "roi_box": metadata.get("roi_box"),
         "selected_shape": metadata["selected_shape"],
         "voxel_count": metadata["voxel_count"],
+        "researcher_has_plaintext_pixels": False,
+        "researcher_has_encrypted_raw_voxels": bool(
+            metadata.get("researcher_has_encrypted_raw_voxels", False)
+        ),
     }
 
 

@@ -117,6 +117,7 @@ button.ghost { border-color: transparent; background: transparent; }
 }
 .form-grid .full { grid-column: 1 / -1; }
 .form-actions { display: flex; gap: 8px; align-items: center; }
+.hint { color: #5d6878; font-size: 12px; line-height: 1.45; }
 
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; background: white; }

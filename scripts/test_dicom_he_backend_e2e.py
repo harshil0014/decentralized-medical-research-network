@@ -139,7 +139,11 @@ for analysis, reference in references.items():
     assert body["modality"] == "CT"
     assert body["unit"] == "HU"
     assert body["voxel_count"] == 16
+    assert body["he_mode"] == "RAW_VOXELS"
+    assert body["representation"] == "ENCRYPTED_RAW_VOXELS"
+    assert body["researcher_has_plaintext_pixels"] is False
     assert body["researcher_has_raw_pixels"] is False
+    assert body["researcher_has_encrypted_raw_voxels"] is True
     assert body["researcher_has_secret_key"] is False
     assert body["ethereum_status"] == "ENCRYPTED"
 
@@ -149,8 +153,10 @@ for analysis, reference in references.items():
     )
     assert computed.status_code == 200, computed.text
     assert computed.json()["result_is_ciphertext"] is True
-    assert computed.json()["researcher_has_secret_key"] is False
+    assert computed.json()["researcher_has_plaintext_pixels"] is False
     assert computed.json()["researcher_has_raw_pixels"] is False
+    assert computed.json()["researcher_has_encrypted_raw_voxels"] is True
+    assert computed.json()["researcher_has_secret_key"] is False
     assert computed.json()["ethereum_status"] == "COMPUTED"
 
     decrypted = client.post(
@@ -182,6 +188,79 @@ for analysis, reference in references.items():
         "DECRYPTED",
     ]
     print(f"DICOM {analysis} E2E: PASS ({value:.6f})")
+
+roi_created = client.post(
+    "/he/dicom/encrypt",
+    headers=hospital,
+    json={
+        "dataset_id": dataset_id,
+        "request_id": request_id,
+        "analysis": "MEAN",
+        "he_mode": "RAW_VOXELS",
+        "scope": "ROI_BOX",
+        "roi_box": {
+            "slice_start": 0,
+            "slice_end": 1,
+            "row_start": 0,
+            "row_end": 2,
+            "col_start": 0,
+            "col_end": 2,
+        },
+    },
+)
+assert roi_created.status_code == 200, roi_created.text
+roi_body = roi_created.json()
+assert roi_body["voxel_count"] == 4
+assert roi_body["selected_shape"] == [1, 2, 2]
+assert roi_body["scope"] == "ROI_BOX"
+assert roi_body["researcher_has_encrypted_raw_voxels"] is True
+roi_job = roi_body["job_id"]
+
+roi_computed = client.post(
+    f"/he/dicom/{roi_job}/compute",
+    headers=researcher,
+)
+assert roi_computed.status_code == 200, roi_computed.text
+roi_decrypted = client.post(
+    f"/he/dicom/{roi_job}/decrypt",
+    headers=hospital,
+)
+assert roi_decrypted.status_code == 200, roi_decrypted.text
+roi_value = float(roi_decrypted.json()["value"])
+assert abs(roi_value - (-1021.5)) <= 0.02, roi_value
+print(f"DICOM RAW ROI E2E: PASS ({roi_value:.6f})")
+
+block_created = client.post(
+    "/he/dicom/encrypt",
+    headers=hospital,
+    json={
+        "dataset_id": dataset_id,
+        "request_id": request_id,
+        "analysis": "MEAN",
+        "he_mode": "BLOCK_STATS",
+        "scope": "WHOLE_VOLUME",
+    },
+)
+assert block_created.status_code == 200, block_created.text
+block_body = block_created.json()
+assert block_body["he_mode"] == "BLOCK_STATS"
+assert block_body["representation"] == "ENCRYPTED_BLOCK_SUFFICIENT_STATISTICS"
+assert block_body["researcher_has_encrypted_raw_voxels"] is False
+block_job = block_body["job_id"]
+
+block_computed = client.post(
+    f"/he/dicom/{block_job}/compute",
+    headers=researcher,
+)
+assert block_computed.status_code == 200, block_computed.text
+block_decrypted = client.post(
+    f"/he/dicom/{block_job}/decrypt",
+    headers=hospital,
+)
+assert block_decrypted.status_code == 200, block_decrypted.text
+block_value = float(block_decrypted.json()["value"])
+assert abs(block_value - float(expected.mean())) <= 0.02, block_value
+print(f"DICOM BLOCK-STATS FALLBACK E2E: PASS ({block_value:.6f})")
 
 revoke = client.post(
     f"/requests/{request_id}/revoke",

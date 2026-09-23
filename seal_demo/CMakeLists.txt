@@ -42,6 +42,14 @@ add_executable(
     dicom_hospital_decrypt_stats
     dicom/hospital_decrypt_stats.cpp
 )
+add_executable(
+    dicom_hospital_encrypt_raw
+    dicom/hospital_encrypt_raw.cpp
+)
+add_executable(
+    dicom_researcher_compute_raw
+    dicom/researcher_compute_raw.cpp
+)
 
 set(SEAL_TARGETS
     medical_he_demo
@@ -53,6 +61,8 @@ set(SEAL_TARGETS
     dicom_hospital_encrypt_stats
     dicom_researcher_compute_stats
     dicom_hospital_decrypt_stats
+    dicom_hospital_encrypt_raw
+    dicom_researcher_compute_raw
 )
 
 foreach(target_name IN LISTS SEAL_TARGETS)

@@ -68,7 +68,9 @@ for binary in \
   hospital_decrypt_sum \
   dicom_hospital_encrypt_stats \
   dicom_researcher_compute_stats \
-  dicom_hospital_decrypt_stats
+  dicom_hospital_decrypt_stats \
+  dicom_hospital_encrypt_raw \
+  dicom_researcher_compute_raw
 do
   test -x "seal_demo/build/$binary"
 done

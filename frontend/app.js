@@ -394,9 +394,18 @@ function renderHEView() {
   toolbar.append(title);
   root.append(toolbar);
 
-  if (state.role === "hospital") root.append(buildEncryptCard(), buildDecryptCard());
-  if (state.role === "researcher") root.append(buildComputeCard());
-  root.append(buildHELookupCard());
+  if (state.role === "hospital") {
+    root.append(
+      buildEncryptCard(),
+      buildDecryptCard(),
+      buildDicomEncryptCard(),
+      buildDicomDecryptCard(),
+    );
+  }
+  if (state.role === "researcher") {
+    root.append(buildComputeCard(), buildDicomComputeCard());
+  }
+  root.append(buildHELookupCard(), buildDicomHELookupCard());
 }
 
 function buildEncryptCard() {
@@ -513,6 +522,195 @@ function buildHELookupCard() {
   card.append(h, row, outputBox("heLookupOutput"));
   return card;
 }
+
+function buildDicomEncryptCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const h = document.createElement("h3");
+  h.textContent = "DICOM HE Encrypt";
+  const form = document.createElement("form");
+  form.className = "form-grid";
+  form.innerHTML = `
+    <input name="dataset_id" placeholder="DICOM Dataset ID" required>
+    <input name="request_id" placeholder="Approved Request ID" required>
+    <select name="analysis" title="Analysis">
+      <option value="MEAN">Mean</option>
+      <option value="VARIANCE">Variance</option>
+      <option value="ENERGY">Energy</option>
+      <option value="SECOND_MOMENT">Second Moment</option>
+      <option value="SUM">Sum</option>
+    </select>
+    <select name="he_mode" title="HE mode">
+      <option value="RAW_VOXELS">Raw Voxels (CKKS)</option>
+      <option value="BLOCK_STATS">Block Stats (large volume)</option>
+    </select>
+    <select name="scope" title="Scope">
+      <option value="WHOLE_VOLUME">Whole Volume</option>
+      <option value="SLICE">Single Slice</option>
+      <option value="ROI_BOX">ROI Box</option>
+    </select>
+    <input name="slice_index" type="number" min="0" placeholder="Slice index (SLICE only)">
+    <input name="slice_start" type="number" min="0" placeholder="ROI slice start">
+    <input name="slice_end" type="number" min="1" placeholder="ROI slice end (exclusive)">
+    <input name="row_start" type="number" min="0" placeholder="ROI row start">
+    <input name="row_end" type="number" min="1" placeholder="ROI row end (exclusive)">
+    <input name="col_start" type="number" min="0" placeholder="ROI col start">
+    <input name="col_end" type="number" min="1" placeholder="ROI col end (exclusive)">
+    <div class="full hint">Raw-voxel mode encrypts each selected voxel. Limit: 262,144 selected voxels. Use Slice/ROI or Block Stats for larger scans.</div>
+    <div class="full form-actions"><button class="primary" type="submit">Encrypt DICOM</button></div>
+  `;
+  const out = outputBox("dicomEncryptOutput");
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const fd = new FormData(form);
+    const scope = String(fd.get("scope"));
+    const payload = {
+      dataset_id: String(fd.get("dataset_id")).trim(),
+      request_id: String(fd.get("request_id")).trim(),
+      analysis: String(fd.get("analysis")),
+      he_mode: String(fd.get("he_mode")),
+      scope,
+    };
+
+    try {
+      if (scope === "SLICE") {
+        const raw = String(fd.get("slice_index") || "").trim();
+        if (!raw) throw new Error("Slice index is required for SLICE scope");
+        payload.slice_index = Number(raw);
+      }
+
+      if (scope === "ROI_BOX") {
+        const names = [
+          "slice_start", "slice_end",
+          "row_start", "row_end",
+          "col_start", "col_end",
+        ];
+        const roi = {};
+        for (const name of names) {
+          const raw = String(fd.get(name) || "").trim();
+          if (!raw) throw new Error("All ROI box values are required");
+          roi[name] = Number(raw);
+        }
+        payload.roi_box = roi;
+      }
+
+      const data = await apiJson("/he/dicom/encrypt", {
+        method: "POST",
+        ...jsonBody(payload),
+      });
+      out.textContent = JSON.stringify(data, null, 2);
+
+      if (data.job_id) {
+        const decrypt = $("dicomDecryptJobId");
+        const lookup = $("dicomHeLookupJobId");
+        if (decrypt) decrypt.value = data.job_id;
+        if (lookup) lookup.value = data.job_id;
+      }
+      showToast("DICOM encrypted");
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+
+  card.append(h, form, out);
+  return card;
+}
+
+function buildDicomDecryptCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const h = document.createElement("h3");
+  h.textContent = "DICOM HE Decrypt Result";
+  const row = document.createElement("div");
+  row.className = "form-grid";
+  const input = document.createElement("input");
+  input.id = "dicomDecryptJobId";
+  input.placeholder = "DICOM HE Job ID";
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  actions.append(button("Decrypt", async () => {
+    const id = input.value.trim();
+    if (!id) return;
+    try {
+      const data = await apiJson(`/he/dicom/${encodeURIComponent(id)}/decrypt`, {
+        method: "POST",
+      });
+      $("dicomDecryptOutput").textContent = JSON.stringify(data, null, 2);
+      const lookup = $("dicomHeLookupJobId");
+      if (lookup) lookup.value = id;
+    } catch (error) {
+      showToast(error.message);
+    }
+  }, "primary"));
+  row.append(input, actions);
+  card.append(h, row, outputBox("dicomDecryptOutput"));
+  return card;
+}
+
+function buildDicomComputeCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const h = document.createElement("h3");
+  h.textContent = "DICOM HE Compute";
+  const row = document.createElement("div");
+  row.className = "form-grid";
+  const input = document.createElement("input");
+  input.id = "dicomComputeJobId";
+  input.placeholder = "DICOM HE Job ID";
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  actions.append(button("Compute", async () => {
+    const id = input.value.trim();
+    if (!id) return;
+    try {
+      const data = await apiJson(`/he/dicom/${encodeURIComponent(id)}/compute`, {
+        method: "POST",
+      });
+      $("dicomComputeOutput").textContent = JSON.stringify(data, null, 2);
+      const lookup = $("dicomHeLookupJobId");
+      if (lookup) lookup.value = id;
+    } catch (error) {
+      showToast(error.message);
+    }
+  }, "primary"));
+  row.append(input, actions);
+  card.append(h, row, outputBox("dicomComputeOutput"));
+  return card;
+}
+
+function buildDicomHELookupCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const h = document.createElement("h3");
+  h.textContent = "DICOM HE Job";
+  const row = document.createElement("div");
+  row.className = "form-grid";
+  const input = document.createElement("input");
+  input.id = "dicomHeLookupJobId";
+  input.placeholder = "DICOM HE Job ID";
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  actions.append(
+    button("Ledger", () => loadDicomHE("ledger")),
+    button("History", () => loadDicomHE("history")),
+  );
+  row.append(input, actions);
+  card.append(h, row, outputBox("dicomHeLookupOutput"));
+  return card;
+}
+
+async function loadDicomHE(kind) {
+  const id = $("dicomHeLookupJobId").value.trim();
+  if (!id) return;
+  try {
+    const data = await apiJson(`/he/dicom/${encodeURIComponent(id)}/${kind}`);
+    $("dicomHeLookupOutput").textContent = JSON.stringify(data, null, 2);
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 
 async function loadHE(kind) {
   const id = $("heLookupJobId").value.trim();

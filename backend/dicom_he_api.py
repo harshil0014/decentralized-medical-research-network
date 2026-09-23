@@ -9,6 +9,7 @@ from backend.storage_crypto import decrypt_bytes, is_encrypted_dataset
 from backend.he_service import fetch_ipfs_dataset_bytes, unpin_ipfs, verify_dataset_bytes
 from backend.dicom_he_service import (
     SUPPORTED_ANALYSES,
+    SUPPORTED_HE_MODES,
     cleanup_dicom_he_job,
     compute_encrypted_dicom_analysis,
     create_encrypted_dicom_job,
@@ -25,12 +26,23 @@ from backend.dicom_he_service import (
 router = APIRouter(prefix="/he/dicom", tags=["DICOM Homomorphic Encryption"])
 
 
+class DicomROIBox(BaseModel):
+    slice_start: int
+    slice_end: int
+    row_start: int
+    row_end: int
+    col_start: int
+    col_end: int
+
+
 class DicomHEInput(BaseModel):
     dataset_id: str
     request_id: str
     analysis: str = "MEAN"
+    he_mode: str = "RAW_VOXELS"
     scope: str = "WHOLE_VOLUME"
     slice_index: int | None = None
+    roi_box: DicomROIBox | None = None
 
 
 def _invoke(function: str, args: list[str], org: str) -> None:
@@ -73,6 +85,13 @@ def encrypt_dicom(payload: DicomHEInput):
                 detail="analysis must be one of: " + ", ".join(sorted(SUPPORTED_ANALYSES)),
             )
 
+        he_mode = payload.he_mode.strip().upper()
+        if he_mode not in SUPPORTED_HE_MODES:
+            raise HTTPException(
+                status_code=400,
+                detail="he_mode must be one of: " + ", ".join(sorted(SUPPORTED_HE_MODES)),
+            )
+
         _require_approved_access(payload.dataset_id, payload.request_id)
         dataset = _query("ReadDatasetPrivate", [payload.dataset_id], "org1")
 
@@ -93,16 +112,23 @@ def encrypt_dicom(payload: DicomHEInput):
             dicom_bytes = stored
             storage_encryption = "LEGACY-PLAINTEXT"
 
+        roi_box = payload.roi_box.model_dump() if payload.roi_box else None
         values, metadata = extract_dicom_analysis_values(
             dicom_bytes,
             scope=payload.scope,
             slice_index=payload.slice_index,
+            roi_box=roi_box,
         )
-        result = create_encrypted_dicom_job(values, analysis, metadata)
+        result = create_encrypted_dicom_job(
+            values,
+            analysis,
+            metadata,
+            he_mode=he_mode,
+        )
         job_id = result["job_id"]
         ciphertext_cid = publish_dicom_ciphertext_bundle(job_id)
 
-        metric = f'DICOM:{analysis}:{metadata["scope"]}'
+        metric = f'DICOM:{analysis}:{metadata["scope"]}:{he_mode}'
         try:
             _invoke(
                 "RegisterHEJob",
