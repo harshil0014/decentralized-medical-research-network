@@ -8,7 +8,11 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pydicom
+from highdicom.seg import SegmentDescription, Segmentation
+from highdicom.seg.enum import SegmentAlgorithmTypeValues, SegmentationTypeValues
 from pydicom.dataset import Dataset, FileDataset
+from pydicom.sr.coding import Code
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -49,12 +53,19 @@ def make_ct() -> bytes:
     ds.SOPInstanceUID = meta.MediaStorageSOPInstanceUID
     ds.StudyInstanceUID = generate_uid()
     ds.SeriesInstanceUID = generate_uid()
+    ds.FrameOfReferenceUID = generate_uid()
 
     # Deliberate fake PHI: the upload path must remove it before IPFS storage.
     ds.PatientName = "PRIVATE^PATIENT"
     ds.PatientID = "MRN-SECRET-001"
     ds.PatientBirthDate = "19800101"
     ds.InstitutionName = "Private Hospital"
+    ds.PatientSex = "O"
+    ds.StudyDate = "20260101"
+    ds.StudyTime = "120000"
+    ds.AccessionNumber = "E2E-ACCESSION"
+    ds.StudyID = "1"
+    ds.SeriesNumber = 1
 
     ds.Modality = "CT"
     ds.StudyDescription = "Synthetic CT HE validation"
@@ -70,16 +81,57 @@ def make_ct() -> bytes:
     ds.PixelRepresentation = 1
     ds.RescaleSlope = "1"
     ds.RescaleIntercept = "-1024"
+    ds.PixelSpacing = [1.0, 1.0]
+    ds.SliceThickness = "1"
+    ds.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
+    ds.ImagePositionPatient = [0.0, 0.0, 0.0]
+    ds.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
     pixels = np.arange(16, dtype=np.int16).reshape(4, 4)
     ds.PixelData = pixels.tobytes()
     ds.save_as(stream, enforce_file_format=True)
     return stream.getvalue()
 
 
+def make_seg(source_bytes: bytes) -> bytes:
+    source = pydicom.dcmread(io.BytesIO(source_bytes))
+    description = SegmentDescription(
+        segment_number=1,
+        segment_label="Test ROI",
+        segmented_property_category=Code(
+            "123037004", "SCT", "Anatomical Structure"
+        ),
+        segmented_property_type=Code(
+            "91723000", "SCT", "Anatomical structure"
+        ),
+        algorithm_type=SegmentAlgorithmTypeValues.MANUAL,
+    )
+    mask = np.zeros((1, 4, 4), dtype=np.uint8)
+    mask[0, :2, :2] = 1
+    seg = Segmentation(
+        source_images=[source],
+        pixel_array=mask,
+        segmentation_type=SegmentationTypeValues.BINARY,
+        segment_descriptions=[description],
+        series_instance_uid=generate_uid(),
+        series_number=99,
+        sop_instance_uid=generate_uid(),
+        instance_number=1,
+        manufacturer="OpenAI Test",
+        manufacturer_model_name="Synthetic",
+        software_versions="1",
+        device_serial_number="1",
+    )
+    stream = io.BytesIO()
+    seg.save_as(stream, enforce_file_format=True)
+    return stream.getvalue()
+
+
 suffix = str(int(time.time() * 1000))
 dataset_id = f"DICOM-HE-E2E-{suffix}"
+seg_dataset_id = f"DICOM-SEG-E2E-{suffix}"
 request_id = f"DICOM-HE-REQ-{suffix}"
 dicom_bytes = make_ct()
+seg_bytes = make_seg(dicom_bytes)
 
 upload = client.post(
     "/datasets/upload",
@@ -95,6 +147,30 @@ upload = client.post(
 assert upload.status_code == 200, upload.text
 assert upload.json()["storageState"] == "PRIVATE_READY"
 assert upload.json()["dataType"] == "DICOM_CT"
+
+seg_upload = client.post(
+    "/datasets/upload",
+    headers=hospital,
+    data={
+        "dataset_id": seg_dataset_id,
+        "data_type": "",
+        "metadata_summary": "",
+        "consent_state": "ACTIVE",
+    },
+    files={"file": ("roi_seg.dcm", io.BytesIO(seg_bytes), "application/dicom")},
+)
+assert seg_upload.status_code == 200, seg_upload.text
+assert seg_upload.json()["storageState"] == "PRIVATE_READY"
+assert seg_upload.json()["dataType"] == "DICOM_SEG"
+
+segment_catalog = client.get(
+    f"/he/dicom/segments/{seg_dataset_id}",
+    headers=hospital,
+)
+assert segment_catalog.status_code == 200, segment_catalog.text
+assert segment_catalog.json()["segment_count"] == 1
+assert segment_catalog.json()["segments"][0]["segment_number"] == 1
+assert segment_catalog.json()["segments"][0]["segment_label"] == "Test ROI"
 
 request = client.post(
     "/requests",
@@ -229,6 +305,52 @@ assert roi_decrypted.status_code == 200, roi_decrypted.text
 roi_value = float(roi_decrypted.json()["value"])
 assert abs(roi_value - (-1021.5)) <= 0.02, roi_value
 print(f"DICOM RAW ROI E2E: PASS ({roi_value:.6f})")
+
+seg_created = client.post(
+    "/he/dicom/encrypt",
+    headers=hospital,
+    json={
+        "dataset_id": dataset_id,
+        "request_id": request_id,
+        "analysis": "MEAN",
+        "he_mode": "RAW_VOXELS",
+        "scope": "DICOM_SEG",
+        "segmentation_dataset_id": seg_dataset_id,
+        "segment_number": 1,
+    },
+)
+assert seg_created.status_code == 200, seg_created.text
+seg_body = seg_created.json()
+assert seg_body["scope"] == "DICOM_SEG"
+assert seg_body["segment_number"] == 1
+assert seg_body["segment_label"] == "Test ROI"
+assert seg_body["segment_voxel_count"] == 4
+assert seg_body["segmentation_dataset_id"] == seg_dataset_id
+assert seg_body["segmentation_dataset_sha256_verified"] is True
+assert seg_body["researcher_has_encrypted_raw_voxels"] is True
+seg_job = seg_body["job_id"]
+
+seg_computed = client.post(
+    f"/he/dicom/{seg_job}/compute",
+    headers=researcher,
+)
+assert seg_computed.status_code == 200, seg_computed.text
+seg_decrypted = client.post(
+    f"/he/dicom/{seg_job}/decrypt",
+    headers=hospital,
+)
+assert seg_decrypted.status_code == 200, seg_decrypted.text
+seg_value = float(seg_decrypted.json()["value"])
+assert abs(seg_value - (-1021.5)) <= 0.02, seg_value
+assert seg_decrypted.json()["segment_number"] == 1
+assert seg_decrypted.json()["segment_label"] == "Test ROI"
+seg_ledger = client.get(
+    f"/he/dicom/{seg_job}/ledger",
+    headers=researcher,
+)
+assert seg_ledger.status_code == 200, seg_ledger.text
+assert ":DICOM_SEG:RAW_VOXELS:SEG1" in seg_ledger.json()["metric"]
+print(f"DICOM SEG RAW-VOXEL E2E: PASS ({seg_value:.6f})")
 
 block_created = client.post(
     "/he/dicom/encrypt",
