@@ -172,6 +172,98 @@ def make_dicom_seg_fixture() -> tuple[bytes, bytes, np.ndarray, str]:
     return source_stream.getvalue(), seg_stream.getvalue(), expected, original_source_sop
 
 
+def make_multislice_dicom_seg_fixture() -> tuple[bytes, bytes, np.ndarray]:
+    study_uid = generate_uid()
+    series_uid = generate_uid()
+    frame_uid = generate_uid()
+    sources = []
+
+    for index in range(3):
+        raw = make_slice(
+            modality="CT",
+            pixels=(
+                np.arange(16, dtype=np.int16).reshape(4, 4)
+                + index * 16
+            ),
+            series_uid=series_uid,
+            study_uid=study_uid,
+            instance=index + 1,
+            slope=1.0,
+            intercept=-1024.0,
+        )
+        source = pydicom.dcmread(io.BytesIO(raw))
+        source.PatientID = "SEG-MULTI"
+        source.PatientName = "SEG^MULTI"
+        source.PatientBirthDate = "20000101"
+        source.PatientSex = "O"
+        source.StudyDate = "20260101"
+        source.StudyTime = "120000"
+        source.AccessionNumber = "SEG-MULTI"
+        source.StudyID = "2"
+        source.SeriesNumber = 2
+        source.FrameOfReferenceUID = frame_uid
+        source.PixelSpacing = [1.0, 1.0]
+        source.SliceThickness = "1"
+        source.SpacingBetweenSlices = "1"
+        source.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
+        source.ImagePositionPatient = [0.0, 0.0, float(index)]
+        source.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
+        sources.append(source)
+
+    description = SegmentDescription(
+        segment_number=1,
+        segment_label="Multi Slice ROI",
+        segmented_property_category=Code(
+            "123037004", "SCT", "Anatomical Structure"
+        ),
+        segmented_property_type=Code(
+            "91723000", "SCT", "Anatomical structure"
+        ),
+        algorithm_type=SegmentAlgorithmTypeValues.MANUAL,
+    )
+
+    mask = np.zeros((3, 4, 4), dtype=np.uint8)
+    mask[:, 0, 0] = 1
+    mask[:, 1, 1] = 1
+
+    segmentation = Segmentation(
+        source_images=sources,
+        pixel_array=mask,
+        segmentation_type=SegmentationTypeValues.BINARY,
+        segment_descriptions=[description],
+        series_instance_uid=generate_uid(),
+        series_number=100,
+        sop_instance_uid=generate_uid(),
+        instance_number=1,
+        manufacturer="OpenAI Test",
+        manufacturer_model_name="Synthetic",
+        software_versions="1",
+        device_serial_number="1",
+    )
+
+    # Match the real upload path: one shared UID map inside the CT
+    # series, but an independent map for the separately uploaded SEG.
+    source_uid_map: dict[str, str] = {}
+    source_zip = io.BytesIO()
+    with zipfile.ZipFile(source_zip, "w", zipfile.ZIP_DEFLATED) as archive:
+        for index, source in enumerate(sources, start=1):
+            cleaned = source.copy()
+            deidentify_dataset(cleaned, uid_map=source_uid_map)
+            stream = io.BytesIO()
+            cleaned.save_as(stream, enforce_file_format=True)
+            archive.writestr(f"slice_{index:04d}.dcm", stream.getvalue())
+
+    seg_clean = segmentation.copy()
+    deidentify_dataset(seg_clean, uid_map={})
+    seg_stream = io.BytesIO()
+    seg_clean.save_as(seg_stream, enforce_file_format=True)
+
+    expected = np.array(
+        [-1024.0, -1019.0, -1008.0, -1003.0, -992.0, -987.0]
+    )
+    return source_zip.getvalue(), seg_stream.getvalue(), expected
+
+
 def assert_close(actual: float, expected: float, label: str) -> None:
     tolerance = max(1e-4, abs(expected) * 2e-6)
     if not math.isclose(actual, expected, rel_tol=2e-6, abs_tol=tolerance):
@@ -356,6 +448,50 @@ def test_dicom_seg_roi() -> None:
     print("DICOM SEG RAW-VOXEL ROI: PASS")
 
 
+def test_multislice_dicom_seg_roi() -> None:
+    source_zip, seg_bytes, expected = make_multislice_dicom_seg_fixture()
+
+    catalog = list_dicom_seg_segments(seg_bytes)
+    assert catalog["segment_count"] == 1
+    assert catalog["segments"][0]["segment_label"] == "Multi Slice ROI"
+
+    values, metadata = extract_dicom_seg_analysis_values(
+        source_zip,
+        seg_bytes,
+        1,
+    )
+    # highdicom may store the volume with the slice axis reversed;
+    # ROI statistics are order-independent, so compare the selected set.
+    assert np.array_equal(np.sort(values), np.sort(expected))
+    assert metadata["original_shape"] == [3, 4, 4]
+    assert metadata["segment_voxel_count"] == 6
+    assert metadata["segment_mask_shape"] == [3, 4, 4]
+    assert metadata["segment_label"] == "Multi Slice ROI"
+
+    job_id = None
+    try:
+        created = create_encrypted_dicom_job(
+            values,
+            "VARIANCE",
+            metadata,
+            he_mode="RAW_VOXELS",
+        )
+        job_id = created["job_id"]
+        computed = compute_encrypted_dicom_analysis(job_id)
+        assert computed["result_is_ciphertext"] is True
+        decrypted = decrypt_dicom_analysis(job_id)
+        assert_close(
+            float(decrypted["value"]),
+            float(expected.var()),
+            "DICOM_SEG_MULTI_VARIANCE",
+        )
+    finally:
+        if job_id:
+            cleanup_dicom_he_job(job_id)
+
+    print("DICOM SEG MULTI-SLICE RAW-VOXEL ROI: PASS")
+
+
 def test_raw_multichunk_and_block_fallback() -> None:
     values = np.linspace(-1000.0, 1000.0, 5000, dtype=np.float64)
     metadata = {
@@ -423,6 +559,7 @@ def main() -> None:
     test_mr_series()
     test_privacy_guards()
     test_dicom_seg_roi()
+    test_multislice_dicom_seg_roi()
     test_raw_multichunk_and_block_fallback()
     print("DICOM HE STATISTICS: PASS")
 

@@ -109,7 +109,7 @@ def deidentify_dataset(ds: pydicom.Dataset, uid_map: dict[str, str] | None = Non
 
     ds.PatientIdentityRemoved = "YES"
     ds.DeidentificationMethod = (
-        "PHI removed; private tags/overlays removed; identity UIDs remapped"
+        "PHI removed; private tags/overlays removed; UIDs remapped"
     )
 
 
