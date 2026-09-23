@@ -172,7 +172,6 @@ def encrypt_dicom(payload: DicomHEInput):
                 payload.segment_number,
             )
             metadata["segmentation_dataset_id"] = segmentation_dataset_id
-            metadata["segmentation_dataset_sha256"] = segmentation_sha256
         else:
             roi_box = payload.roi_box.model_dump() if payload.roi_box else None
             values, metadata = extract_dicom_analysis_values(
