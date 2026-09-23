@@ -5,7 +5,11 @@ import math
 import zipfile
 
 import numpy as np
+import pydicom
+from highdicom.seg import SegmentDescription, Segmentation
+from highdicom.seg.enum import SegmentAlgorithmTypeValues, SegmentationTypeValues
 from pydicom.dataset import Dataset, FileDataset
+from pydicom.sr.coding import Code
 from pydicom.uid import (
     CTImageStorage,
     ExplicitVRLittleEndian,
@@ -19,7 +23,10 @@ from backend.dicom_he_service import (
     create_encrypted_dicom_job,
     decrypt_dicom_analysis,
     extract_dicom_analysis_values,
+    extract_dicom_seg_analysis_values,
+    list_dicom_seg_segments,
 )
+from backend.dicom_utils import deidentify_dataset
 
 
 def make_slice(
@@ -91,6 +98,78 @@ def make_series_zip(
             )
         archive.writestr("README.txt", b"non-DICOM helper")
     return output.getvalue()
+
+
+def make_dicom_seg_fixture() -> tuple[bytes, bytes, np.ndarray, str]:
+    study_uid = generate_uid()
+    series_uid = generate_uid()
+    frame_uid = generate_uid()
+    raw = make_slice(
+        modality="CT",
+        pixels=np.arange(16, dtype=np.int16).reshape(4, 4),
+        series_uid=series_uid,
+        study_uid=study_uid,
+        instance=1,
+        slope=1.0,
+        intercept=-1024.0,
+    )
+    source = pydicom.dcmread(io.BytesIO(raw))
+    source.PatientID = "SEG-TEST"
+    source.PatientName = "SEG^TEST"
+    source.PatientBirthDate = "20000101"
+    source.PatientSex = "O"
+    source.StudyDate = "20260101"
+    source.StudyTime = "120000"
+    source.AccessionNumber = "SEGTEST"
+    source.StudyID = "1"
+    source.SeriesNumber = 1
+    source.FrameOfReferenceUID = frame_uid
+    source.PixelSpacing = [1.0, 1.0]
+    source.SliceThickness = "1"
+    source.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
+    source.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
+
+    description = SegmentDescription(
+        segment_number=1,
+        segment_label="Test ROI",
+        segmented_property_category=Code(
+            "123037004", "SCT", "Anatomical Structure"
+        ),
+        segmented_property_type=Code(
+            "91723000", "SCT", "Anatomical structure"
+        ),
+        algorithm_type=SegmentAlgorithmTypeValues.MANUAL,
+    )
+    mask = np.zeros((1, 4, 4), dtype=np.uint8)
+    mask[0, :2, :2] = 1
+    segmentation = Segmentation(
+        source_images=[source],
+        pixel_array=mask,
+        segmentation_type=SegmentationTypeValues.BINARY,
+        segment_descriptions=[description],
+        series_instance_uid=generate_uid(),
+        series_number=99,
+        sop_instance_uid=generate_uid(),
+        instance_number=1,
+        manufacturer="OpenAI Test",
+        manufacturer_model_name="Synthetic",
+        software_versions="1",
+        device_serial_number="1",
+    )
+
+    original_source_sop = str(source.SOPInstanceUID)
+    source_clean = source.copy()
+    seg_clean = segmentation.copy()
+    deidentify_dataset(source_clean, uid_map={})
+    deidentify_dataset(seg_clean, uid_map={})
+
+    source_stream = io.BytesIO()
+    source_clean.save_as(source_stream, enforce_file_format=True)
+    seg_stream = io.BytesIO()
+    seg_clean.save_as(seg_stream, enforce_file_format=True)
+
+    expected = np.array([-1024.0, -1023.0, -1020.0, -1019.0])
+    return source_stream.getvalue(), seg_stream.getvalue(), expected, original_source_sop
 
 
 def assert_close(actual: float, expected: float, label: str) -> None:
@@ -221,6 +300,62 @@ def test_privacy_guards() -> None:
     print("BURNED-IN ANNOTATION GUARD: PASS")
 
 
+def test_dicom_seg_roi() -> None:
+    source_bytes, seg_bytes, expected, original_source_sop = make_dicom_seg_fixture()
+
+    cleaned_seg = pydicom.dcmread(io.BytesIO(seg_bytes))
+    ui_values = {
+        str(value)
+        for element in cleaned_seg.iterall()
+        if element.VR == "UI"
+        for value in (
+            element.value if isinstance(element.value, (list, tuple)) else [element.value]
+        )
+    }
+    assert original_source_sop not in ui_values
+
+    catalog = list_dicom_seg_segments(seg_bytes)
+    assert catalog["segmentation_type"] == "BINARY"
+    assert catalog["segment_count"] == 1
+    assert catalog["segments"][0]["segment_number"] == 1
+    assert catalog["segments"][0]["segment_label"] == "Test ROI"
+
+    values, metadata = extract_dicom_seg_analysis_values(
+        source_bytes,
+        seg_bytes,
+        1,
+    )
+    assert np.array_equal(values, expected)
+    assert metadata["scope"] == "DICOM_SEG"
+    assert metadata["segment_number"] == 1
+    assert metadata["segment_label"] == "Test ROI"
+    assert metadata["segment_voxel_count"] == 4
+
+    job_id = None
+    try:
+        created = create_encrypted_dicom_job(
+            values,
+            "MEAN",
+            metadata,
+            he_mode="RAW_VOXELS",
+        )
+        job_id = created["job_id"]
+        assert created["representation"] == "ENCRYPTED_RAW_VOXELS"
+        computed = compute_encrypted_dicom_analysis(job_id)
+        assert computed["result_is_ciphertext"] is True
+        decrypted = decrypt_dicom_analysis(job_id)
+        assert_close(
+            float(decrypted["value"]),
+            float(expected.mean()),
+            "DICOM_SEG_MEAN",
+        )
+    finally:
+        if job_id:
+            cleanup_dicom_he_job(job_id)
+
+    print("DICOM SEG RAW-VOXEL ROI: PASS")
+
+
 def test_raw_multichunk_and_block_fallback() -> None:
     values = np.linspace(-1000.0, 1000.0, 5000, dtype=np.float64)
     metadata = {
@@ -287,6 +422,7 @@ def main() -> None:
     test_ct_series()
     test_mr_series()
     test_privacy_guards()
+    test_dicom_seg_roi()
     test_raw_multichunk_and_block_fallback()
     print("DICOM HE STATISTICS: PASS")
 
