@@ -83,22 +83,33 @@ def deidentify_dataset(ds: pydicom.Dataset, uid_map: dict[str, str] | None = Non
             uid_map[value] = generate_uid()
         return uid_map[value]
 
-    for keyword in (
+    identity_uid_keywords = {
         "StudyInstanceUID",
         "SeriesInstanceUID",
         "FrameOfReferenceUID",
-    ):
-        if keyword in ds:
-            setattr(ds, keyword, remap(getattr(ds, keyword)))
+        "SynchronizationFrameOfReferenceUID",
+        "SOPInstanceUID",
+        "ReferencedSOPInstanceUID",
+    }
 
-    if "SOPInstanceUID" in ds:
-        ds.SOPInstanceUID = generate_uid()
-        if "MediaStorageSOPInstanceUID" in ds.file_meta:
-            ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+    def remap_dataset_uids(dataset: pydicom.Dataset) -> None:
+        for element in dataset:
+            if element.VR == "SQ":
+                for item in element.value:
+                    remap_dataset_uids(item)
+                continue
+
+            if element.keyword in identity_uid_keywords and element.value:
+                element.value = remap(element.value)
+
+    remap_dataset_uids(ds)
+
+    if "SOPInstanceUID" in ds and "MediaStorageSOPInstanceUID" in ds.file_meta:
+        ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
 
     ds.PatientIdentityRemoved = "YES"
     ds.DeidentificationMethod = (
-        "PHI removed; private tags/overlays removed; UIDs remapped"
+        "PHI removed; private tags/overlays removed; identity UIDs remapped"
     )
 
 
