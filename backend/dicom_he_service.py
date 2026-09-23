@@ -47,7 +47,7 @@ SUPPORTED_ANALYSES = {
     "SECOND_MOMENT",
     "VARIANCE",
 }
-SUPPORTED_SCOPES = {"WHOLE_VOLUME", "SLICE", "ROI_BOX"}
+SUPPORTED_SCOPES = {"WHOLE_VOLUME", "SLICE", "ROI_BOX", "DICOM_SEG"}
 SUPPORTED_MODALITIES = {"CT", "MR"}
 SUPPORTED_HE_MODES = {"RAW_VOXELS", "BLOCK_STATS"}
 
@@ -293,6 +293,173 @@ def _build_volume(
     return _fallback_volume(datasets), "pydicom"
 
 
+def _segment_code_meaning(description, keyword: str) -> str | None:
+    sequence = getattr(description, keyword, None)
+    if not sequence:
+        return None
+    item = sequence[0]
+    meaning = getattr(item, "CodeMeaning", None)
+    return str(meaning) if meaning not in (None, "") else None
+
+
+def _read_single_segmentation(data: bytes):
+    if hd is None:
+        raise RuntimeError("highdicom is required for DICOM SEG analysis")
+
+    datasets = _read_dicom_datasets(data)
+    if len(datasets) != 1:
+        raise ValueError(
+            "Segmentation dataset must contain exactly one DICOM SEG object"
+        )
+
+    ds = datasets[0]
+    if str(getattr(ds, "Modality", "")).upper() != "SEG":
+        raise ValueError("Segmentation dataset must have DICOM Modality SEG")
+
+    if str(getattr(ds, "SegmentationType", "")).upper() != "BINARY":
+        raise ValueError(
+            "DICOM SEG HE currently supports binary segmentations only"
+        )
+
+    try:
+        segmentation = hd.seg.Segmentation.from_dataset(ds, copy=True)
+    except Exception as exc:
+        raise ValueError("Invalid or unsupported DICOM SEG object") from exc
+
+    return segmentation
+
+
+def list_dicom_seg_segments(data: bytes) -> dict:
+    segmentation = _read_single_segmentation(data)
+    segments = []
+
+    for number in segmentation.segment_numbers:
+        description = segmentation.get_segment_description(int(number))
+        segments.append(
+            {
+                "segment_number": int(number),
+                "segment_label": str(
+                    getattr(description, "SegmentLabel", f"Segment {number}")
+                ),
+                "property_category": _segment_code_meaning(
+                    description,
+                    "SegmentedPropertyCategoryCodeSequence",
+                ),
+                "property_type": _segment_code_meaning(
+                    description,
+                    "SegmentedPropertyTypeCodeSequence",
+                ),
+                "algorithm_type": str(
+                    getattr(description, "SegmentAlgorithmType", "") or ""
+                ),
+            }
+        )
+
+    return {
+        "segmentation_type": "BINARY",
+        "segment_count": len(segments),
+        "segments": segments,
+    }
+
+
+def extract_dicom_seg_analysis_values(
+    source_data: bytes,
+    segmentation_data: bytes,
+    segment_number: int,
+) -> tuple[np.ndarray, dict]:
+    if hd is None:
+        raise RuntimeError("highdicom is required for DICOM SEG analysis")
+
+    source_datasets = _read_dicom_datasets(source_data)
+    modality = _validate_dicom_series(source_datasets)
+
+    try:
+        source_volume = hd.get_volume_from_series(
+            source_datasets,
+            dtype=np.float64,
+            apply_modality_transform=None,
+            apply_voi_transform=False,
+        )
+    except Exception as exc:
+        raise ValueError(
+            "DICOM SEG analysis requires complete source image geometry "
+            "(orientation, position, spacing, and frame of reference)"
+        ) from exc
+
+    source_array = np.asarray(source_volume.array, dtype=np.float64)
+    if source_array.ndim != 3:
+        raise ValueError("DICOM source volume must be three-dimensional")
+    if not np.isfinite(source_array).all():
+        raise ValueError("DICOM source volume contains non-finite values")
+    if source_array.size > MAX_VOXELS:
+        raise ValueError(f"DICOM volume exceeds {MAX_VOXELS:,} voxels")
+
+    segmentation = _read_single_segmentation(segmentation_data)
+    available = [int(value) for value in segmentation.segment_numbers]
+    requested = int(segment_number)
+    if requested not in available:
+        raise ValueError(
+            "segment_number is not present in the DICOM SEG object; "
+            f"available segments: {available}"
+        )
+
+    try:
+        segment_volume = segmentation.get_volume(
+            segment_numbers=[requested],
+            combine_segments=True,
+            relabel=False,
+            dtype=np.uint8,
+            allow_missing_positions=True,
+        )
+        aligned_segment = segment_volume.match_geometry(source_volume)
+    except Exception as exc:
+        raise ValueError(
+            "DICOM SEG geometry does not align with the source image series"
+        ) from exc
+
+    mask = np.asarray(aligned_segment.array) > 0
+    if mask.ndim != 3 or mask.shape != source_array.shape:
+        raise ValueError("Aligned DICOM SEG mask does not match source volume shape")
+
+    voxel_count = int(np.count_nonzero(mask))
+    if voxel_count < 2:
+        raise ValueError("Selected DICOM segment contains fewer than two voxels")
+
+    selected = np.ascontiguousarray(source_array[mask], dtype=np.float64)
+    description = segmentation.get_segment_description(requested)
+    label = str(
+        getattr(description, "SegmentLabel", f"Segment {requested}")
+    )
+    unit = "HU" if modality == "CT" else "relative_intensity"
+
+    metadata = {
+        "modality": modality,
+        "unit": unit,
+        "scope": "DICOM_SEG",
+        "slice_index": None,
+        "roi_box": None,
+        "original_shape": [int(x) for x in source_array.shape],
+        "selected_shape": [voxel_count],
+        "voxel_count": voxel_count,
+        "dicom_loader": "highdicom",
+        "segmentation_type": "BINARY",
+        "segment_number": requested,
+        "segment_label": label,
+        "segment_voxel_count": voxel_count,
+        "segment_mask_shape": [int(x) for x in mask.shape],
+        "segment_property_category": _segment_code_meaning(
+            description,
+            "SegmentedPropertyCategoryCodeSequence",
+        ),
+        "segment_property_type": _segment_code_meaning(
+            description,
+            "SegmentedPropertyTypeCodeSequence",
+        ),
+    }
+
+    return selected, metadata
+
+
 def extract_dicom_analysis_values(
     data: bytes,
     scope: str = "WHOLE_VOLUME",
@@ -320,7 +487,12 @@ def extract_dicom_analysis_values(
     normalized_scope = scope.strip().upper()
     if normalized_scope not in SUPPORTED_SCOPES:
         raise ValueError(
-            "scope must be WHOLE_VOLUME, SLICE, or ROI_BOX"
+            "scope must be WHOLE_VOLUME, SLICE, ROI_BOX, or DICOM_SEG"
+        )
+
+    if normalized_scope == "DICOM_SEG":
+        raise ValueError(
+            "DICOM_SEG scope requires a separate segmentation dataset"
         )
 
     original_shape = tuple(int(x) for x in volume.shape)
@@ -766,6 +938,10 @@ def decrypt_dicom_analysis(job_id: str) -> dict:
         "scope": metadata["scope"],
         "slice_index": metadata["slice_index"],
         "roi_box": metadata.get("roi_box"),
+        "segmentation_dataset_id": metadata.get("segmentation_dataset_id"),
+        "segment_number": metadata.get("segment_number"),
+        "segment_label": metadata.get("segment_label"),
+        "segment_voxel_count": metadata.get("segment_voxel_count"),
         "selected_shape": metadata["selected_shape"],
         "voxel_count": metadata["voxel_count"],
         "researcher_has_plaintext_pixels": False,
