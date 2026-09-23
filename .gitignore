@@ -36,3 +36,9 @@ ethereum/build/
 ethereum/deployment.json
 *.ganache-db/
 ethereum_private_locators.json
+# Never commit real hospital / patient DICOM data
+private_dicom/
+hospital_dicom/
+real_dicom/
+*.dcm
+*.dicom

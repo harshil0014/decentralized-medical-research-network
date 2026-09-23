@@ -1061,3 +1061,5 @@ def download_dataset(request_id: str):
 # Microsoft SEAL homomorphic-encryption API
 from backend.he_api import router as he_router
 app.include_router(he_router)
+from backend.dicom_he_api import router as dicom_he_router
+app.include_router(dicom_he_router)
