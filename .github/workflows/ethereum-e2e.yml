@@ -80,7 +80,7 @@ jobs:
 
       - name: DICOM regression
         run: |
-          backend/.venv/bin/python scripts/test_dicom_series.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_dicom_series.py
           PYTHONPATH=. backend/.venv/bin/python scripts/test_dicom_he_stats.py
 
       - name: Full backend end-to-end
