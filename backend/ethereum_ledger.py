@@ -108,6 +108,32 @@ def account_address(org: str) -> str:
     return _account(org)
 
 
+def _hospital_private_key() -> str | None:
+    key_file = os.environ.get("MEDICAL_HOSPITAL_PRIVATE_KEY_FILE", "").strip()
+    if not key_file:
+        return None
+
+    path = Path(key_file)
+    if not path.exists():
+        raise RuntimeError(f"Hospital Ethereum key file is missing: {path}")
+    if os.name == "posix" and (path.stat().st_mode & 0o077):
+        raise RuntimeError("Hospital Ethereum key file permissions are too broad")
+
+    value = path.read_text(encoding="utf-8").strip()
+    if not value.startswith("0x"):
+        value = "0x" + value
+    if len(value) != 66:
+        raise RuntimeError("Hospital Ethereum private key is invalid")
+
+    derived = _web3().eth.account.from_key(value).address
+    expected = _account("org1")
+    if derived.lower() != expected.lower():
+        raise RuntimeError(
+            "Hospital Ethereum private key does not match deployment authority"
+        )
+    return value
+
+
 def _org_name(address: str) -> str:
     data = _deployment()
     value = (address or "").lower()
@@ -221,6 +247,7 @@ def _he_job(row) -> dict[str, Any]:
 
 def _send(method: str, args: list[Any], org: str):
     try:
+        w3 = _web3()
         fn = getattr(_contract().functions, method)(*args)
         sender = _account(org)
         estimated_gas = fn.estimate_gas({"from": sender})
@@ -228,11 +255,33 @@ def _send(method: str, args: list[Any], org: str):
             estimated_gas * 2,
             estimated_gas + 100_000,
         )
-        tx_hash = fn.transact({
-            "from": sender,
-            "gas": gas_limit,
-        })
-        receipt = _web3().eth.wait_for_transaction_receipt(
+
+        private_key = _hospital_private_key() if org == "org1" else None
+        if private_key:
+            nonce = w3.eth.get_transaction_count(sender, "pending")
+            transaction = fn.build_transaction(
+                {
+                    "from": sender,
+                    "nonce": nonce,
+                    "gas": gas_limit,
+                    "chainId": w3.eth.chain_id,
+                    "gasPrice": w3.eth.gas_price,
+                }
+            )
+            signed = w3.eth.account.sign_transaction(
+                transaction,
+                private_key=private_key,
+            )
+            tx_hash = w3.eth.send_raw_transaction(
+                signed.raw_transaction
+            )
+        else:
+            tx_hash = fn.transact({
+                "from": sender,
+                "gas": gas_limit,
+            })
+
+        receipt = w3.eth.wait_for_transaction_receipt(
             tx_hash,
             timeout=60,
         )
@@ -245,7 +294,6 @@ def _send(method: str, args: list[Any], org: str):
         raise
     except Exception as exc:
         raise _http_error(method, exc) from exc
-
 
 def _call(method: str, args: list[Any], org: str):
     try:
@@ -260,7 +308,7 @@ def health() -> dict[str, Any]:
     data = _deployment()
     return {
         "connected": w3.is_connected(),
-        "network": "Ganache",
+        "network": data.get("network", "Ethereum"),
         "chainId": w3.eth.chain_id,
         "blockNumber": w3.eth.block_number,
         "contractAddress": data["contractAddress"],
