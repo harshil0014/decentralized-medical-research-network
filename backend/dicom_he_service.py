@@ -24,6 +24,7 @@ from backend.he_service import (
     _ipfs_add_file,
     _ipfs_cat_artifact,
 )
+from backend.secure_temp import secure_plaintext_temp_root
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,8 +36,12 @@ RAW_HOSPITAL_ENCRYPT = BUILD_DIR / "dicom_hospital_encrypt_raw"
 RAW_RESEARCHER_COMPUTE = BUILD_DIR / "dicom_researcher_compute_raw"
 HOSPITAL_DECRYPT = BUILD_DIR / "dicom_hospital_decrypt_stats"
 
-RUNTIME_ROOT = Path("/tmp/medical-he-jobs")
-RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+RUNTIME_ROOT = secure_plaintext_temp_root() / "medical-he-jobs"
+RUNTIME_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+try:
+    RUNTIME_ROOT.chmod(0o700)
+except OSError:
+    pass
 
 JOB_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
