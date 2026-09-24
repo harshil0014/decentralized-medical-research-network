@@ -20,6 +20,7 @@ from backend.api_auth import (
 from backend.runtime_security import (
     require_mutation_lock,
 )
+from backend.researcher_signing import verify_researcher_signature
 
 from backend.storage_crypto import (
     decrypt_bytes,
@@ -56,6 +57,10 @@ class GlucoseCohortInput(BaseModel):
     metric: str = "fasting_glucose"
 
 
+class ResearcherSignatureInput(BaseModel):
+    signature: str
+
+
 def _ledger_invoke(
     function: str,
     args: list[str],
@@ -86,6 +91,15 @@ def _ledger_query(
     )
 
     return json.loads(raw)
+
+
+def _ledger_scalar_query(
+    function: str,
+    args: list[str],
+    org: str,
+) -> str:
+    from backend.app import query
+    return query(function, args, org)
 
 
 def _require_approved_access(
@@ -341,6 +355,33 @@ def encrypt_glucose_cohort(
         ) from exc
 
 
+@router.get("/{job_id}/signing-digest")
+def compute_signing_digest(
+    job_id: str,
+    identity: AuthIdentity = Depends(require_researcher),
+):
+    actor_org = researcher_org(identity)
+    from backend.ethereum_ledger import account_address
+    actor_address = account_address(actor_org)
+    ledger = _ledger_query("ReadHEJob", [job_id], actor_org)
+
+    if str(ledger.get("researcherAddress") or "").lower() != actor_address.lower():
+        raise HTTPException(
+            status_code=403,
+            detail="HE job belongs to a different researcher wallet",
+        )
+    if ledger.get("status") != "ENCRYPTED":
+        raise HTTPException(status_code=409, detail="HE job is not in ENCRYPTED state")
+
+    digest = _ledger_scalar_query("HEComputeDigest", [job_id], actor_org)
+    return {
+        "jobId": job_id,
+        "signingDigest": digest,
+        "ethereumAddress": actor_address,
+        "signatureScheme": "EIP-191 personal_sign",
+    }
+
+
 @router.post(
     "/{job_id}/compute-average",
     dependencies=[
@@ -349,6 +390,7 @@ def encrypt_glucose_cohort(
 )
 def compute_average(
     job_id: str,
+    body: ResearcherSignatureInput,
     identity: AuthIdentity = Depends(require_researcher),
 ):
     result_cid = None
@@ -375,6 +417,17 @@ def compute_average(
             ledger["requestId"],
             actor_org=actor_org,
             actor_address=actor_address,
+        )
+
+        signing_digest = _ledger_scalar_query(
+            "HEComputeDigest",
+            [job_id],
+            actor_org,
+        )
+        verify_researcher_signature(
+            identity,
+            signing_digest,
+            body.signature,
         )
 
         ciphertext_cid = ledger.get(
@@ -424,13 +477,14 @@ def compute_average(
 
         try:
             _ledger_invoke(
-                "RecordHEComputation",
+                "RecordHEComputationSigned",
                 [
                     job_id,
                     result_cid,
                     result["result_sha256"],
+                    body.signature,
                 ],
-                actor_org,
+                "org1",
             )
 
         except Exception:
