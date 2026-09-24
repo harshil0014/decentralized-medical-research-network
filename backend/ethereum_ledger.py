@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import fcntl
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -28,6 +30,9 @@ PRIVATE_LOCATOR_PATH = Path(
         "MEDICAL_ETHEREUM_PRIVATE_LOCATORS",
         str(AUTH_ROOT / "ethereum_private_locators.json"),
     )
+)
+HE_LOCATOR_PATH = Path(
+    os.environ.get("MEDICAL_ETHEREUM_HE_LOCATORS", str(AUTH_ROOT / "ethereum_he_locators.json"))
 )
 
 
@@ -217,6 +222,40 @@ def _locator_commitment(cid: str, sha256: str):
     return Web3.keccak(text=f"{cid}:{sha256.lower()}")
 
 
+def _he_locator_commitment(cid: str) -> str:
+    return "sha256:" + hashlib.sha256(cid.encode("utf-8")).hexdigest()
+
+
+def _load_he_locators() -> dict:
+    if not HE_LOCATOR_PATH.exists():
+        return {}
+    data = json.loads(HE_LOCATOR_PATH.read_text())
+    if not isinstance(data, dict):
+        raise RuntimeError("Private HE locator store is invalid")
+    return data
+
+
+def _store_he_locator(job_id: str, name: str, cid: str) -> None:
+    HE_LOCATOR_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = HE_LOCATOR_PATH.with_suffix(".lock")
+    with open(lock_path, "a+") as lock_file:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            data = _load_he_locators()
+            entry = data.setdefault(job_id, {})
+            old = entry.get(name)
+            if old and old != cid:
+                raise RuntimeError("HE artifact locator already bound to another CID")
+            entry[name] = cid
+            temp = HE_LOCATOR_PATH.with_suffix(".tmp")
+            temp.write_text(json.dumps(data, sort_keys=True))
+            os.chmod(temp, 0o600)
+            os.replace(temp, HE_LOCATOR_PATH)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _dataset(row) -> dict[str, Any]:
     return {
         "datasetId": row[0],
@@ -260,7 +299,21 @@ def _rotation(row) -> dict[str, Any]:
     }
 
 
-def _he_job(row) -> dict[str, Any]:
+def _he_job(row, org: str = "org2", *, historical: bool = False) -> dict[str, Any]:
+    private = org == "org1" or (
+        org.startswith("researcher-address:")
+        and org.split(":", 1)[1].lower() == str(row[12]).lower()
+    )
+    locators = _load_he_locators().get(row[0], {}) if private else {}
+    ciphertext_cid = locators.get("ciphertextCid", "")
+    result_cid = locators.get("resultCid", "")
+    if ciphertext_cid and _he_locator_commitment(ciphertext_cid) != row[7]:
+        raise RuntimeError("HE ciphertext locator commitment mismatch")
+    if result_cid and _he_locator_commitment(result_cid) != row[9]:
+        if historical:
+            result_cid = ""
+        else:
+            raise RuntimeError("HE result locator commitment mismatch")
     return {
         "jobId": row[0],
         "datasetId": row[1],
@@ -269,9 +322,11 @@ def _he_job(row) -> dict[str, Any]:
         "secondaryRequestId": row[4],
         "metric": row[5],
         "cohortSize": int(row[6]),
-        "ciphertextCid": row[7],
+        "ciphertextCid": ciphertext_cid,
+        "ciphertextLocatorCommitment": row[7],
         "ciphertextManifestSha256": row[8],
-        "resultCid": row[9],
+        "resultCid": result_cid,
+        "resultLocatorCommitment": row[9],
         "resultSha256": row[10],
         "ownerOrg": _org_name(row[11]),
         "ownerAddress": row[11],
@@ -440,6 +495,19 @@ def invoke(function: str, args: list[str], org: str) -> None:
         )
         return
 
+    if function == "ReplaceDatasetCiphertext":
+        _send(
+            "replaceDatasetCiphertext",
+            [args[0], Web3.to_bytes(hexstr=args[1]), Web3.to_bytes(hexstr=args[2]),
+             int(args[3]), int(args[4])],
+            org,
+        )
+        return
+
+    if function == "RecordDatasetMigration":
+        _send("recordDatasetMigration", [args[0], int(args[1]), Web3.to_checksum_address(args[2])], org)
+        return
+
     if function == "RegisterHEJob":
         _send(
             "registerHEJob",
@@ -451,11 +519,12 @@ def invoke(function: str, args: list[str], org: str) -> None:
                 args[4],
                 args[5],
                 int(args[6]),
-                args[7],
+                _he_locator_commitment(args[7]),
                 args[8],
             ],
             org,
         )
+        _store_he_locator(args[0], "ciphertextCid", args[7])
         return
 
     if function == "RecordHEComputationSigned":
@@ -463,12 +532,13 @@ def invoke(function: str, args: list[str], org: str) -> None:
             "recordHEComputationBySig",
             [
                 args[0],
-                args[1],
+                _he_locator_commitment(args[1]),
                 args[2],
                 bytes.fromhex(args[3].removeprefix("0x")),
             ],
             "org1",
         )
+        _store_he_locator(args[0], "resultCid", args[1])
         return
 
     if function == "RecordHEDecryption":
@@ -535,6 +605,9 @@ def query(function: str, args: list[str], org: str = "org2") -> str:
 
     if function == "DatasetCount":
         return str(_call("datasetCount", [], org))
+
+    if function == "MigrationSource":
+        return Web3.to_hex(_call("migrationSource", args[:1], org))
 
     if function == "GetDatasetHistory":
         history = []
@@ -616,7 +689,7 @@ def query(function: str, args: list[str], org: str = "org2") -> str:
         )
 
     if function == "ReadHEJob":
-        return json.dumps(_he_job(_call("getHEJob", args[:1], org)))
+        return json.dumps(_he_job(_call("getHEJob", args[:1], org), org))
 
     if function == "GetHEJobHistory":
         history = []
@@ -627,7 +700,7 @@ def query(function: str, args: list[str], org: str = "org2") -> str:
         for index, row in enumerate(
             _call("getHEJobHistoryPage", [args[0], offset, limit], org)
         ):
-            value = _he_job(row)
+            value = _he_job(row, org, historical=True)
             timestamp = (
                 value["decryptedAt"]
                 or value["computedAt"]

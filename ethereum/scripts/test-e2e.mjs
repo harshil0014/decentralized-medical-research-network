@@ -30,6 +30,10 @@ const requestId = "req-" + randomBytes(16).toString("hex");
 const jobId = "JOB-E2E-" + suffix;
 const fakeSha = "a".repeat(64);
 const fakeResultSha = "b".repeat(64);
+const ciphertextLocator = "sha256:" + "1".repeat(64);
+const resultLocator = "sha256:" + "2".repeat(64);
+const revokedCiphertextLocator = "sha256:" + "3".repeat(64);
+const revokedResultLocator = "sha256:" + "4".repeat(64);
 const metadataCommitment = "sha256:" + "c".repeat(64);
 const purposeCommitment = "sha256:" + "d".repeat(64);
 const commitment = ethers.keccak256(ethers.toUtf8Bytes("bafy-demo:" + fakeSha));
@@ -65,6 +69,8 @@ for (const label of ["hiv_status", "BRCA1_mutation", "cancer_stage", "patient-al
   await rejects("registerDataset", "ds-" + randomBytes(16).toString("hex"), label,
     metadataCommitment, "ACTIVE");
 }
+await rejects("registerHEJob", jobId + "-raw-cid", datasetId, requestId,
+  "", "", "CSV:sha256:" + "e".repeat(64), 4, "bafy-private-he-object", fakeSha);
 
 await sendTx(hospitalContract, "registerDataset", datasetId, "CSV", metadataCommitment, "ACTIVE");
 let ds = await hospitalContract.getDataset(datasetId);
@@ -175,7 +181,7 @@ assert.equal(rotation.status, "COMMITTED");
 
 for (const label of ["hiv_status", "BRCA1_mutation", "cancer_stage", "patient-alice"]) {
   await rejects("registerHEJob", jobId + "-" + label, datasetId, requestId,
-    "", "", label, 4, "bafy-ciphertext", fakeSha);
+    "", "", label, 4, ciphertextLocator, fakeSha);
 }
 
 await sendTx(
@@ -188,7 +194,7 @@ await sendTx(
   "",
   "CSV:sha256:" + "e".repeat(64),
   4,
-  "bafy-ciphertext",
+  ciphertextLocator,
   fakeSha
 );
 
@@ -196,12 +202,13 @@ let job = await hospitalContract.getHEJob(jobId);
 assert.equal(job.status, "ENCRYPTED");
 assert.equal(job.researcher.toLowerCase(), researcher.address.toLowerCase());
 assert.equal(job.metric, "CSV:sha256:" + "e".repeat(64));
+assert.equal(job.ciphertextLocatorCommitment, ciphertextLocator);
 
 const computeDigest = await hospitalContract.heComputeDigest(jobId);
 const computeSignature = await researcher.signMessage(ethers.getBytes(computeDigest));
-await rejects("recordHEComputationBySig", jobId, "bafy-result", fakeResultSha,
+await rejects("recordHEComputationBySig", jobId, resultLocator, fakeResultSha,
   requestSignature);
-await rejects("recordHEComputationBySig", jobId, "bafy-result", fakeResultSha,
+await rejects("recordHEComputationBySig", jobId, resultLocator, fakeResultSha,
   await otherResearcher.signMessage(ethers.getBytes(computeDigest)));
 const order = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
 const rawSig = ethers.getBytes(computeSignature);
@@ -210,12 +217,12 @@ const highS = ethers.concat([
   ethers.zeroPadValue(ethers.toBeHex(order - BigInt(ethers.hexlify(rawSig.slice(32, 64)))), 32),
   Uint8Array.from([rawSig[64] === 27 ? 28 : 27])
 ]);
-await rejects("recordHEComputationBySig", jobId, "bafy-result", fakeResultSha, highS);
+await rejects("recordHEComputationBySig", jobId, resultLocator, fakeResultSha, highS);
 await sendTx(
   hospitalContract,
   "recordHEComputationBySig",
   jobId,
-  "bafy-result",
+  resultLocator,
   fakeResultSha,
   computeSignature
 );
@@ -237,27 +244,27 @@ await sendTx(
   "",
   "CSV:sha256:" + "e".repeat(64),
   4,
-  "bafy-ciphertext-revoke",
+  revokedCiphertextLocator,
   fakeSha
 );
 const revokedComputeDigest = await hospitalContract.heComputeDigest(revokedJobId);
 const revokedComputeSignature = await researcher.signMessage(
   ethers.getBytes(revokedComputeDigest)
 );
-await rejects("recordHEComputationBySig", revokedJobId, "bafy-result-revoke",
+await rejects("recordHEComputationBySig", revokedJobId, revokedResultLocator,
   fakeResultSha, computeSignature);
 await sendTx(
   hospitalContract,
   "recordHEComputationBySig",
   revokedJobId,
-  "bafy-result-revoke",
+  revokedResultLocator,
   fakeResultSha,
   revokedComputeSignature
 );
 
-const dHist = await hospitalContract.getDatasetHistory(datasetId);
-const aHist = await hospitalContract.getAccessHistory(requestId);
-const hHist = await hospitalContract.getHEJobHistory(jobId);
+const dHist = await hospitalContract.getDatasetHistoryPage(datasetId, 0, 100);
+const aHist = await hospitalContract.getAccessHistoryPage(requestId, 0, 100);
+const hHist = await hospitalContract.getHEJobHistoryPage(jobId, 0, 100);
 assert(dHist.length >= 2);
 assert(aHist.length >= 2);
 assert(hHist.length >= 3);
@@ -275,6 +282,15 @@ assert.equal(decryptAfterRevokeBlocked, true);
 
 await sendTx(hospitalContract, "updateConsent", datasetId, "REVOKED");
 assert.equal(await hospitalContract.canAccess(requestId), false);
+
+const replacementCommitment = ethers.keccak256(ethers.toUtf8Bytes("replacement-" + suffix));
+await rejects("replaceDatasetCiphertext", datasetId, ethers.ZeroHash,
+  replacementCommitment, 2, 3);
+await sendTx(hospitalContract, "replaceDatasetCiphertext", datasetId,
+  commitment, replacementCommitment, 2, 3);
+assert.equal((await hospitalContract.getDataset(datasetId)).locatorCommitment, replacementCommitment);
+assert.equal((await hospitalContract.getKeyRotation(datasetId, 3)).status, "REENCRYPTED");
+assert.equal(Number(await hospitalContract.datasetHistoryCount(datasetId)), dHist.length + 2);
 
 console.log("EXTERNAL RESEARCHER WALLET SIGNATURES: PASS");
 console.log("SOLIDITY GOVERNANCE E2E: PASS");

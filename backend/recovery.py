@@ -58,6 +58,21 @@ def _locator_path() -> Path:
     )
 
 
+def _he_locator_path() -> Path:
+    auth_root = Path(os.environ.get("MEDICAL_REGISTRY_AUTH_DIR", "/root/.medical-registry"))
+    return Path(os.environ.get("MEDICAL_ETHEREUM_HE_LOCATORS", str(auth_root / "ethereum_he_locators.json")))
+
+
+def _read_he_locators() -> dict:
+    path = _he_locator_path()
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise RuntimeError("Private HE locator store is invalid")
+    return data
+
+
 def recovery_backup_path() -> Path:
     raw = os.environ.get("MEDICAL_RECOVERY_BACKUP_PATH", "").strip()
     if not raw:
@@ -166,6 +181,7 @@ def _ledger_fingerprint() -> dict:
 def _build_payload() -> dict:
     key_files = _collect_key_files()
     locators = _read_locators()
+    he_locators = _read_he_locators()
 
     manifest = {
         "keyFiles": {
@@ -175,6 +191,7 @@ def _build_payload() -> dict:
         "privateLocatorsSha256": hashlib.sha256(
             _canonical(locators)
         ).hexdigest(),
+        "heLocatorsSha256": hashlib.sha256(_canonical(he_locators)).hexdigest(),
     }
 
     object_backups = collect_backup_manifest()
@@ -189,6 +206,7 @@ def _build_payload() -> dict:
         "ledger": _ledger_fingerprint(),
         "keyFiles": key_files,
         "privateLocators": locators,
+        "heLocators": he_locators,
         "objectBackups": object_backups,
         "manifest": manifest,
     }
@@ -253,7 +271,7 @@ def snapshot_recovery_bundle() -> dict:
     }
 
 
-def _decode_bundle(bundle: bytes) -> dict:
+def _decode_bundle(bundle: bytes, *, expected_ledger: dict | None = None) -> dict:
     if not bundle.startswith(MAGIC):
         raise ValueError("Recovery bundle magic is invalid")
 
@@ -283,7 +301,7 @@ def _decode_bundle(bundle: bytes) -> dict:
     if payload.get("schemaVersion") != 1:
         raise ValueError("Unsupported recovery bundle schema")
 
-    current = _ledger_fingerprint()
+    current = expected_ledger or _ledger_fingerprint()
     recorded = payload.get("ledger") or {}
     if (
         int(recorded.get("chainId", -1)) != current["chainId"]
@@ -327,7 +345,89 @@ def _decode_bundle(bundle: bytes) -> dict:
     ):
         raise ValueError("Recovery private locator integrity check failed")
 
+    he_locators = payload.get("heLocators", {})
+    if not isinstance(he_locators, dict):
+        raise ValueError("Recovery HE locator store is invalid")
+    expected_he = manifest.get("heLocatorsSha256")
+    if expected_he is not None and hashlib.sha256(_canonical(he_locators)).hexdigest() != expected_he:
+        raise ValueError("Recovery HE locator integrity check failed")
+
     return payload
+
+
+def migrate_recovery_bundle(
+    bundle: bytes, *, source_rpc_url: str, source_chain_id: int,
+    source_contract_address: str,
+) -> dict:
+    """Hospital-authorized encrypted migration to a distinct deployment."""
+    from eth_abi import encode
+    from web3 import Web3
+    from backend.ethereum_ledger import invoke, invoke_private_org1, query, _deployment
+
+    source = {"chainId": int(source_chain_id),
+              "contractAddress": Web3.to_checksum_address(source_contract_address).lower()}
+    destination = _ledger_fingerprint()
+    if source == destination:
+        raise ValueError("Migration requires a distinct source deployment")
+    payload = _decode_bundle(bundle, expected_ledger=source)
+    if collect_backup_manifest() != payload["objectBackups"]:
+        raise ValueError("Destination encrypted-object backup does not match source bundle")
+    existing_keys = _collect_key_files()
+    if existing_keys and existing_keys != payload["keyFiles"]:
+        raise ValueError("Destination key store is not empty or identical to the migration bundle")
+    existing_locators = _read_locators()
+    if any(key not in payload["privateLocators"] or value != payload["privateLocators"][key]
+           for key, value in existing_locators.items()):
+        raise ValueError("Destination private locators conflict with migration bundle")
+
+    source_web3 = Web3(Web3.HTTPProvider(source_rpc_url, request_kwargs={"timeout": 10}))
+    if source_web3.eth.chain_id != source["chainId"]:
+        raise ValueError("Source RPC chain ID does not match the recovery bundle")
+    abi_path = Path(__file__).resolve().parents[1] / "ethereum/build/MedicalResearchRegistry.abi.json"
+    abi = json.loads(abi_path.read_text())
+    source_contract = source_web3.eth.contract(address=Web3.to_checksum_address(source_contract_address), abi=abi)
+    hospital = str(_deployment()["hospitalAddress"]).lower()
+    verified = []
+    for dataset_id, locator in sorted(payload["privateLocators"].items()):
+        row = source_contract.functions.getDataset(dataset_id).call()
+        commitment = Web3.keccak(text=f"{locator['cid']}:{locator['sha256'].lower()}")
+        if (not row[10] or str(row[1]).lower() != hospital
+                or row[5] != "PRIVATE_READY" or bytes(row[6]) != commitment):
+            raise ValueError(f"Source dataset commitment or Hospital authority mismatch: {dataset_id}")
+        verified.append((dataset_id, row, locator, Web3.to_hex(commitment)))
+
+    for dataset_id, row, locator, commitment in verified:
+        if query("DatasetExists", [dataset_id], "org1") != "true":
+            invoke("RegisterDataset", [dataset_id, row[2], row[3], row[4]], "org1")
+        public = json.loads(query("ReadDataset", [dataset_id], "org1"))
+        if public["storageState"] == "PRIVATE_PENDING":
+            invoke_private_org1("StoreDatasetLocatorPrivate", [dataset_id], {"dataset_locator": locator})
+            invoke("FinalizeDatasetRegistration", [dataset_id], "org1")
+        public = json.loads(query("ReadDataset", [dataset_id], "org1"))
+        if public["locatorCommitment"].lower() != commitment.lower():
+            raise ValueError(f"Destination dataset commitment mismatch: {dataset_id}")
+        expected_source = Web3.keccak(encode(
+            ["uint256", "address"],
+            [source["chainId"], Web3.to_checksum_address(source_contract_address)],
+        ))
+        recorded = query("MigrationSource", [dataset_id], "org1")
+        if int(recorded, 16) == 0:
+            invoke("RecordDatasetMigration", [dataset_id, str(source["chainId"]), source_contract_address], "org1")
+        elif recorded.lower() != Web3.to_hex(expected_source).lower():
+            raise ValueError(f"Destination migration provenance conflicts: {dataset_id}")
+
+    payload["ledger"] = destination
+    payload["heLocators"] = {}
+    payload["manifest"]["heLocatorsSha256"] = hashlib.sha256(_canonical({})).hexdigest()
+    nonce = os.urandom(NONCE_SIZE)
+    destination_bundle = MAGIC + nonce + AESGCM(_recovery_key()).encrypt(
+        nonce, _canonical(payload), MAGIC,
+    )
+    restored = restore_recovery_bundle(destination_bundle, replace_existing=True)
+    snapshot = snapshot_recovery_bundle()
+    return {"source": source, "destination": destination,
+            "migratedDatasets": len(verified), "recovery": restored,
+            "destinationBackup": snapshot}
 
 
 def restore_recovery_bundle(
@@ -339,6 +439,7 @@ def restore_recovery_bundle(
 
     key_root = _key_root()
     locator_path = _locator_path()
+    he_locator_path = _he_locator_path()
     key_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     key_files = payload["keyFiles"]
@@ -357,6 +458,8 @@ def restore_recovery_bundle(
         ]
         if locator_path.exists():
             conflicts.append(str(locator_path))
+        if he_locator_path.exists():
+            conflicts.append(str(he_locator_path))
         if conflicts:
             raise RuntimeError(
                 "Recovery restore would overwrite existing state; "
@@ -378,6 +481,7 @@ def restore_recovery_bundle(
         if locator_path.exists()
         else None
     )
+    original_he_locator = he_locator_path.read_bytes() if he_locator_path.exists() else None
 
     restored_cids: list[str] = []
     try:
@@ -406,6 +510,10 @@ def restore_recovery_bundle(
         ipfs_recovery = restore_missing_ipfs_objects(
             locators,
             expected_manifest=payload["objectBackups"],
+        )
+        _atomic_write(
+            he_locator_path,
+            (json.dumps(payload.get("heLocators", {}), sort_keys=True) + "\n").encode(),
         )
         restored_cids = ipfs_recovery.pop("restoredCids")
 
@@ -447,6 +555,11 @@ def restore_recovery_bundle(
                 pass
         else:
             _atomic_write(locator_path, original_locator)
+
+        if original_he_locator is None:
+            he_locator_path.unlink(missing_ok=True)
+        else:
+            _atomic_write(he_locator_path, original_he_locator)
 
         raise
 

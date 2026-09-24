@@ -79,9 +79,9 @@ from backend.storage_crypto import load_dataset_key  # noqa: E402
 from backend.he_service import RUNTIME_ROOT as HE_RUNTIME_ROOT  # noqa: E402
 from backend.dicom_he_service import RUNTIME_ROOT as DICOM_HE_RUNTIME_ROOT  # noqa: E402
 from backend.ipfs_storage import has as ipfs_has, ipfs_containers, unpin as ipfs_unpin  # noqa: E402
-from backend.ipfs_storage import add_file as ipfs_add_file  # noqa: E402
-from backend.ethereum_ledger import invoke, invoke_private_org1  # noqa: E402
-from backend.storage_crypto import get_or_create_dataset_key  # noqa: E402
+from backend.ipfs_storage import add_file as ipfs_add_file, cat as ipfs_cat  # noqa: E402
+from backend.ethereum_ledger import invoke, invoke_private_org1, query, _load_locators, _save_locators  # noqa: E402
+from backend.storage_crypto import get_or_create_dataset_key, decrypt_bytes, load_dataset_key_metadata, delete_dataset_key  # noqa: E402
 from backend.recovery import restore_recovery_bundle  # noqa: E402
 
 legacy_dataset_id = "ds-" + uuid.uuid4().hex
@@ -436,6 +436,10 @@ he_create = client.post(
 assert he_create.status_code == 200, he_create.text
 average_job = he_create.json()["job_id"]
 assert he_create.json()["ethereum_status"] == "ENCRYPTED"
+from backend.ethereum_ledger import _contract as ledger_contract
+on_chain_he = ledger_contract().functions.getHEJob(average_job).call()
+assert on_chain_he[7].startswith("sha256:")
+assert he_create.json()["ciphertext_cid"] not in json.dumps(on_chain_he)
 
 wrong_compute = client.post(
     f"/he/glucose/{average_job}/compute-average",
@@ -472,9 +476,22 @@ history = client.get(
 assert ledger.status_code == 200, ledger.text
 assert ledger.json()["status"] == "DECRYPTED"
 assert ledger.json()["metric"].startswith("CSV:sha256:")
+assert ledger.json()["ciphertextCid"] == ""
+assert ledger.json()["resultCid"] == ""
+assert ledger.json()["ciphertextLocatorCommitment"].startswith("sha256:")
 assert "glucose_mg_dl" not in json.dumps(ledger.json())
 assert history.status_code == 200, history.text
 assert len(history.json()) >= 3
+
+# The encrypted recovery bundle also restores the private HE artifact map.
+he_locator_path = auth / "ethereum_he_locators.json"
+assert average_job in json.loads(he_locator_path.read_text())
+from backend.recovery import snapshot_recovery_bundle
+he_snapshot = snapshot_recovery_bundle()
+he_locator_path.unlink()
+assert not he_locator_path.exists()
+restore_recovery_bundle(Path(he_snapshot["path"]).read_bytes(), replace_existing=True)
+assert average_job in json.loads(he_locator_path.read_text())
 
 sum_create = client.post(
     "/he/glucose/encrypt",
@@ -588,5 +605,73 @@ raw_preview = client.get(f"/datasets/{raw_dataset_id}/preview", headers=hospital
 assert raw_preview.status_code == 422, raw_preview.text
 ipfs_unpin(raw_cid)
 raw_source.unlink()
+locators = _load_locators()
+del locators[raw_dataset_id]
+_save_locators(locators)
+delete_dataset_key(raw_dataset_id)
+
+# A suspected compromised dataset key requires ciphertext replacement, not
+# merely a new key generation for future uploads.
+old_locator = json.loads(query("ReadDatasetPrivate", [dataset_id], "org1"))
+old_version = load_dataset_key_metadata(dataset_id)["activeKeyVersion"]
+with patch("backend.app.snapshot_recovery_bundle", side_effect=RuntimeError("simulated interruption")):
+    interrupted = client.post(f"/datasets/{dataset_id}/remediate-key", headers=hospital)
+assert interrupted.status_code == 503, interrupted.text
+assert (Path(os.environ["MEDICAL_DATA_BACKUP_DIR"]) / f"{dataset_id}.remediation.json").exists()
+remediation = client.post(f"/datasets/{dataset_id}/remediate-key", headers=hospital)
+assert remediation.status_code == 200, remediation.text
+assert remediation.json()["activeKeyVersion"] == old_version + 1
+new_locator = json.loads(query("ReadDatasetPrivate", [dataset_id], "org1"))
+assert new_locator["cid"] != old_locator["cid"]
+assert new_locator["locatorCommitment"] != old_locator["locatorCommitment"]
+new_ciphertext = ipfs_cat(new_locator["cid"])
+assert new_ciphertext.startswith(b"MEDAES02")
+assert hashlib.sha256(new_ciphertext).hexdigest() == new_locator["sha256"]
+assert decrypt_bytes(dataset_id, new_ciphertext) == csv_bytes
+new_preview = client.get(f"/datasets/{dataset_id}/preview", headers=hospital)
+assert new_preview.status_code == 200, new_preview.text
+assert remediation.json()["recoveryBackup"]["size"] > 0
+assert not (Path(os.environ["MEDICAL_DATA_BACKUP_DIR"]) / f"{dataset_id}.remediation.json").exists()
+print("KEY-COMPROMISE RE-ENCRYPTION E2E: PASS")
+
+# Intentional migration requires the Hospital to name the source deployment.
+# Ordinary restore remains bound to the original contract.
+source_deployment = json.loads((REPO_ROOT / "ethereum/deployment.json").read_text())
+source_bundle = client.get("/admin/recovery/export", headers=hospital)
+assert source_bundle.status_code == 200, source_bundle.text
+subprocess.run(["npm", "--prefix", "ethereum", "run", "deploy"],
+               cwd=REPO_ROOT, env=os.environ.copy(), check=True, capture_output=True)
+destination_deployment = json.loads((REPO_ROOT / "ethereum/deployment.json").read_text())
+assert destination_deployment["contractAddress"] != source_deployment["contractAddress"]
+destination_root = runtime / "migration-destination"
+os.environ["MEDICAL_KEY_ROOT"] = str(destination_root / "keys")
+os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"] = str(destination_root / "locators.json")
+os.environ["MEDICAL_ETHEREUM_HE_LOCATORS"] = str(destination_root / "he_locators.json")
+os.environ["MEDICAL_RECOVERY_BACKUP_PATH"] = str(destination_root / "recovery.medrec")
+import backend.ethereum_ledger as destination_ledger
+destination_ledger.PRIVATE_LOCATOR_PATH = destination_root / "locators.json"
+destination_ledger.HE_LOCATOR_PATH = destination_root / "he_locators.json"
+destination_ledger._contract.cache_clear()
+destination_ledger._web3.cache_clear()
+destination_ledger._deployment.cache_clear()
+try:
+    restore_recovery_bundle(source_bundle.content, replace_existing=True)
+except ValueError as exc:
+    assert "different chain or contract" in str(exc)
+else:
+    raise AssertionError("Ordinary restore accepted a different deployment")
+migration = client.post("/admin/recovery/migrate", headers=hospital,
+    data={
+        "source_rpc_url": source_deployment["rpcUrl"],
+        "source_chain_id": str(source_deployment["chainId"]),
+        "source_contract_address": source_deployment["contractAddress"],
+    }, files={"backup": ("source.medrec", io.BytesIO(source_bundle.content), "application/octet-stream")})
+assert migration.status_code == 200, migration.text
+assert migration.json()["migratedDatasets"] == 1
+assert int(query("MigrationSource", [dataset_id], "org1"), 16) != 0
+migrated = json.loads(query("ReadDatasetPrivate", [dataset_id], "org1"))
+assert migrated["locatorCommitment"] == new_locator["locatorCommitment"]
+assert decrypt_bytes(dataset_id, ipfs_cat(migrated["cid"])) == csv_bytes
+print("CROSS-CONTRACT ENCRYPTED MIGRATION E2E: PASS")
 
 print("FASTAPI + ETHEREUM + IPFS + AES + SEAL E2E: PASS")

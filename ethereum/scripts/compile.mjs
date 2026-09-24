@@ -13,7 +13,7 @@ const input = {
     "MedicalResearchRegistry.sol": { content: source }
   },
   settings: {
-    optimizer: { enabled: true, runs: 200 },
+    optimizer: { enabled: true, runs: 1 },
     viaIR: true,
     // The permissioned QBFT genesis starts at Berlin. Avoid PUSH0 opcodes
     // so one artifact works on both Besu and the Ganache compatibility runner.

@@ -177,6 +177,8 @@ keccak256(CID + ":" + SHA256)
 
 to Solidity during dataset finalization.
 
+HE ciphertext and result CIDs are likewise stored in a Hospital-private locator file (`MEDICAL_ETHEREUM_HE_LOCATORS`); the contract stores only `sha256:<digest>` commitments. Authorized backend reads verify each private CID against its on-chain commitment. Public job/history responses expose commitments without CIDs. The encrypted recovery bundle includes this private HE locator file, and deliberate contract migration clears it because old HE jobs and researcher signatures remain bound to the source deployment.
+
 When the Hospital later reads the private record, the backend recomputes and verifies the commitment.
 
 ## Automated tests
@@ -253,7 +255,7 @@ Dataset AES keys are not stored as raw 32-byte files. Each key generation is wra
 
 ## Key rotation semantics
 
-Dataset key rotation creates a new active AES key generation for future encrypted objects while retaining historical generations as DECRYPT_ONLY so existing immutable IPFS ciphertext remains readable. It is **version rotation**, not retroactive re-encryption. If an old key is suspected compromised, the affected ciphertext must be re-encrypted and republished under a new dataset/version; rotating metadata alone does not remediate historical ciphertext.
+Dataset key rotation creates a new active AES key generation for future encrypted objects while retaining historical generations as DECRYPT_ONLY so existing immutable IPFS ciphertext remains readable. It is **version rotation**, not retroactive re-encryption. For a suspected compromised key, the Hospital uses `POST /datasets/{dataset_id}/remediate-key`: it decrypts only in RAM, re-encrypts under a fresh generation, verifies the replicated MEDAES object, stages its encrypted backup, atomically updates the on-chain commitment and key audit, refreshes recovery, then unpins the old object. A journal lets the Hospital retry an interrupted finalization. Copies of old ciphertext or a key already obtained by an adversary cannot be clawed back.
 
 ## DICOM analysis semantics
 
@@ -271,3 +273,5 @@ Dataset browsing and history endpoints support `offset` and `limit` query parame
 Successful dataset registration and key rotation automatically refresh an encrypted `MEDREC01` recovery bundle at `MEDICAL_RECOVERY_BACKUP_PATH`. The bundle contains the wrapped dataset-key registry, Hospital-private CID/SHA locators and an authenticated manifest of encrypted-object backups. The encrypted MEDAES objects themselves live in `MEDICAL_DATA_BACKUP_DIR`, outside the primary key/auth/IPFS directories. The bundle is AES-GCM authenticated under a recovery key derived from the external master secret and bound to the current Ethereum chain ID and contract address.
 
 Hospital-only recovery endpoints support snapshot, encrypted export, and restore. Restore validates bundle authentication, encrypted-object SHA, chain/contract identity, dataset-key metadata and every private locator commitment against Ethereum, then restores missing encrypted objects to the replicated IPFS layer and verifies their CIDs. A failed verification rolls local keys and locators back. Both backup destinations must be in a separate failure domain; the demo exports `MEDICAL_IPFS_DATA_ROOT` so backup paths inside the primary IPFS data directory are rejected. Historical pre-encryption prototype data must be re-imported and re-encrypted; plaintext IPFS compatibility was intentionally removed.
+
+Ordinary restore remains bound to its source chain and contract. For a deliberate redeployment, the Hospital can call `POST /admin/recovery/migrate` with the source MEDREC bundle plus `source_rpc_url`, `source_chain_id`, and `source_contract_address`. Copy the external encrypted-object backup directory to the destination first and start with an empty destination key/locator store. Migration verifies source ledger commitments and Hospital ownership, registers matching destination records, records a migration provenance event, restores wrapped keys and encrypted objects, then creates a destination-bound recovery snapshot. Access requests and researcher signatures are deployment-bound and must be created again on the destination.

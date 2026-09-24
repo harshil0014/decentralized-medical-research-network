@@ -48,9 +48,9 @@ contract MedicalResearchRegistry {
         string secondaryRequestId;
         string metric;
         uint256 cohortSize;
-        string ciphertextCid;
+        string ciphertextLocatorCommitment;
         string ciphertextManifestSha256;
-        string resultCid;
+        string resultLocatorCommitment;
         string resultSha256;
         address owner;
         address researcher;
@@ -73,6 +73,7 @@ contract MedicalResearchRegistry {
 
     mapping(string => HEJobRecord) private heJobs;
     mapping(string => HEJobRecord[]) private heJobHistory;
+    mapping(string => bytes32) public migrationSource;
 
     event DatasetRegistered(string indexed datasetId, address indexed owner);
     event DatasetFinalized(string indexed datasetId, bytes32 locatorCommitment);
@@ -80,8 +81,10 @@ contract MedicalResearchRegistry {
     event AccessRequested(string indexed requestId, string indexed datasetId, address indexed requester);
     event AccessDecisionRecorded(string indexed requestId, string status, address indexed decidedBy);
     event DatasetKeyRotated(string indexed datasetId, uint256 previousVersion, uint256 newVersion);
+    event DatasetCiphertextReplaced(string indexed datasetId, bytes32 oldCommitment, bytes32 newCommitment, uint256 newKeyVersion);
+    event DatasetMigrationRecorded(string indexed datasetId, uint256 sourceChainId, address indexed sourceContract);
     event HEJobRegistered(string indexed jobId, string indexed datasetId, address indexed researcher);
-    event HEComputationRecorded(string indexed jobId, string resultCid, string resultSha256);
+    event HEComputationRecorded(string indexed jobId, string resultLocatorCommitment, string resultSha256);
     event HEDecryptionRecorded(string indexed jobId);
 
     modifier onlyHospital() {
@@ -236,7 +239,7 @@ contract MedicalResearchRegistry {
                 job.secondaryRequestId,
                 job.metric,
                 job.cohortSize,
-                job.ciphertextCid,
+                job.ciphertextLocatorCommitment,
                 job.ciphertextManifestSha256,
                 job.researcher
             )
@@ -330,26 +333,16 @@ contract MedicalResearchRegistry {
         return datasets[datasetId].exists;
     }
 
+    function recordDatasetMigration(string calldata datasetId, uint256 sourceChainId, address sourceContract) external onlyHospital {
+        require(datasets[datasetId].exists && _eq(datasets[datasetId].storageState, "PRIVATE_READY"), "dataset not ready");
+        require(sourceContract != address(0) && migrationSource[datasetId] == bytes32(0), "invalid migration");
+        migrationSource[datasetId] = keccak256(abi.encode(sourceChainId, sourceContract));
+        emit DatasetMigrationRecorded(datasetId, sourceChainId, sourceContract);
+    }
+
     function getDataset(string calldata datasetId) external view returns (Dataset memory) {
         require(datasets[datasetId].exists, "dataset missing");
         return datasets[datasetId];
-    }
-
-    function getAllDatasets() external view returns (Dataset[] memory) {
-        uint256 count = 0;
-        for (uint256 i = 0; i < datasetIds.length; i++) {
-            if (datasets[datasetIds[i]].exists) count++;
-        }
-
-        Dataset[] memory out = new Dataset[](count);
-        uint256 cursor = 0;
-        for (uint256 i = 0; i < datasetIds.length; i++) {
-            if (datasets[datasetIds[i]].exists) {
-                out[cursor] = datasets[datasetIds[i]];
-                cursor++;
-            }
-        }
-        return out;
     }
 
     function datasetCount() external view returns (uint256) {
@@ -381,10 +374,6 @@ contract MedicalResearchRegistry {
         Dataset[] memory out = new Dataset[](end - offset);
         for (uint256 i = offset; i < end; i++) out[i - offset] = records[i];
         return out;
-    }
-
-    function getDatasetHistory(string calldata datasetId) external view returns (Dataset[] memory) {
-        return datasetHistory[datasetId];
     }
 
     function requestAccessBySig(
@@ -460,14 +449,6 @@ contract MedicalResearchRegistry {
             _eq(ds.storageState, "PRIVATE_READY");
     }
 
-    function getAccessHistory(string calldata requestId) external view returns (AccessRequest[] memory) {
-        return accessHistory[requestId];
-    }
-
-    function accessHistoryCount(string calldata requestId) external view returns (uint256) {
-        return accessHistory[requestId].length;
-    }
-
     function getAccessHistoryPage(string calldata requestId, uint256 offset, uint256 limit) external view returns (AccessRequest[] memory) {
         require(limit > 0 && limit <= 100, "page limit out of range");
         AccessRequest[] storage records = accessHistory[requestId];
@@ -506,6 +487,37 @@ contract MedicalResearchRegistry {
         emit DatasetKeyRotated(datasetId, previousVersion, newVersion);
     }
 
+    function replaceDatasetCiphertext(
+        string calldata datasetId,
+        bytes32 expectedCommitment,
+        bytes32 newCommitment,
+        uint256 previousKeyVersion,
+        uint256 newKeyVersion
+    ) external onlyHospital {
+        Dataset storage ds = datasets[datasetId];
+        require(ds.exists && _eq(ds.storageState, "PRIVATE_READY"), "dataset not ready");
+        require(ds.locatorCommitment == expectedCommitment, "locator changed");
+        require(newCommitment != bytes32(0) && newCommitment != expectedCommitment, "invalid replacement commitment");
+        require(newKeyVersion == previousKeyVersion + 1, "invalid replacement key version");
+        bytes32 key = _rotationKey(datasetId, newKeyVersion);
+        require(!keyRotations[key].exists, "rotation exists");
+        keyRotations[key] = KeyRotationRecord({
+            datasetId: datasetId,
+            previousKeyVersion: previousKeyVersion,
+            newKeyVersion: newKeyVersion,
+            owner: msg.sender,
+            status: "REENCRYPTED",
+            rotatedAt: uint64(block.timestamp),
+            exists: true
+        });
+        ds.locatorCommitment = newCommitment;
+        ds.version += 1;
+        ds.updatedAt = uint64(block.timestamp);
+        _pushDatasetHistory(datasetId);
+        emit DatasetKeyRotated(datasetId, previousKeyVersion, newKeyVersion);
+        emit DatasetCiphertextReplaced(datasetId, expectedCommitment, newCommitment, newKeyVersion);
+    }
+
     function keyRotationExists(string calldata datasetId, uint256 version) external view returns (bool) {
         return keyRotations[_rotationKey(datasetId, version)].exists;
     }
@@ -524,13 +536,14 @@ contract MedicalResearchRegistry {
         string calldata secondaryRequestId,
         string calldata metric,
         uint256 cohortSize,
-        string calldata ciphertextCid,
+        string calldata ciphertextLocatorCommitment,
         string calldata ciphertextManifestSha256
     ) external onlyHospital {
         require(!heJobs[jobId].exists, "HE job exists");
         require(bytes(jobId).length > 0, "jobId required");
         require(cohortSize > 0, "cohort size required");
         require(_validHEMetricDescriptor(metric), "invalid HE metric descriptor");
+        require(_validSha256Commitment(ciphertextLocatorCommitment), "HE locator commitment required");
 
         AccessRequest storage req = requests[requestId];
         require(req.exists, "request missing");
@@ -556,9 +569,9 @@ contract MedicalResearchRegistry {
             secondaryRequestId: secondaryRequestId,
             metric: metric,
             cohortSize: cohortSize,
-            ciphertextCid: ciphertextCid,
+            ciphertextLocatorCommitment: ciphertextLocatorCommitment,
             ciphertextManifestSha256: ciphertextManifestSha256,
-            resultCid: "",
+            resultLocatorCommitment: "",
             resultSha256: "",
             owner: msg.sender,
             researcher: req.requester,
@@ -580,12 +593,13 @@ contract MedicalResearchRegistry {
 
     function recordHEComputationBySig(
         string calldata jobId,
-        string calldata resultCid,
+        string calldata resultLocatorCommitment,
         string calldata resultSha256,
         bytes calldata researcherSignature
     ) external {
         HEJobRecord storage job = heJobs[jobId];
         require(job.exists, "HE job missing");
+        require(_validSha256Commitment(resultLocatorCommitment), "HE result locator commitment required");
         require(_eq(job.status, "ENCRYPTED"), "HE job not encrypted");
         require(canAccess(job.requestId), "access no longer active");
         if (bytes(job.secondaryRequestId).length > 0) {
@@ -598,12 +612,12 @@ contract MedicalResearchRegistry {
         );
         require(researcher == job.researcher, "approved researcher signature required");
 
-        job.resultCid = resultCid;
+        job.resultLocatorCommitment = resultLocatorCommitment;
         job.resultSha256 = resultSha256;
         job.status = "COMPUTED";
         job.computedAt = uint64(block.timestamp);
         _pushHEHistory(jobId);
-        emit HEComputationRecorded(jobId, resultCid, resultSha256);
+        emit HEComputationRecorded(jobId, resultLocatorCommitment, resultSha256);
     }
 
     function recordHEDecryption(string calldata jobId) external onlyHospital {
@@ -619,14 +633,6 @@ contract MedicalResearchRegistry {
         job.decryptedAt = uint64(block.timestamp);
         _pushHEHistory(jobId);
         emit HEDecryptionRecorded(jobId);
-    }
-
-    function getHEJobHistory(string calldata jobId) external view returns (HEJobRecord[] memory) {
-        return heJobHistory[jobId];
-    }
-
-    function heJobHistoryCount(string calldata jobId) external view returns (uint256) {
-        return heJobHistory[jobId].length;
     }
 
     function getHEJobHistoryPage(string calldata jobId, uint256 offset, uint256 limit) external view returns (HEJobRecord[] memory) {

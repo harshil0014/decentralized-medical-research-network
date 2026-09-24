@@ -159,6 +159,40 @@ def backup_encrypted_dataset(
     return metadata
 
 
+def stage_replacement_backup(dataset_id: str, source: Path, cid: str, sha256: str) -> None:
+    """Durably stage new ciphertext without replacing the active backup."""
+    object_path, metadata_path = _paths(dataset_id)
+    staged_object = object_path.with_suffix(".staged.medobj")
+    staged_metadata = metadata_path.with_suffix(".staged.json")
+    actual = _sha256_file(source)
+    if actual != sha256 or not _SHA256.fullmatch(sha256):
+        raise RuntimeError("Replacement encrypted-object SHA-256 mismatch")
+    temporary = staged_object.with_name("." + staged_object.name + "." + uuid.uuid4().hex + ".tmp")
+    with source.open("rb") as src, open(temporary, "xb") as dst:
+        os.chmod(temporary, 0o600)
+        shutil.copyfileobj(src, dst, length=1024 * 1024)
+        dst.flush()
+        os.fsync(dst.fileno())
+    os.replace(temporary, staged_object)
+    _atomic_write(staged_metadata, (json.dumps({
+        "schemaVersion": 1, "datasetId": dataset_id, "cid": cid,
+        "sha256": sha256, "size": source.stat().st_size,
+    }, sort_keys=True) + "\n").encode())
+
+
+def promote_replacement_backup(dataset_id: str, cid: str, sha256: str) -> None:
+    object_path, metadata_path = _paths(dataset_id)
+    staged_object = object_path.with_suffix(".staged.medobj")
+    staged_metadata = metadata_path.with_suffix(".staged.json")
+    if _sha256_file(staged_object) != sha256:
+        raise RuntimeError("Staged replacement object integrity check failed")
+    metadata = json.loads(staged_metadata.read_text())
+    if metadata["cid"] != cid or metadata["sha256"] != sha256:
+        raise RuntimeError("Staged replacement metadata mismatch")
+    os.replace(staged_object, object_path)
+    os.replace(staged_metadata, metadata_path)
+
+
 def delete_dataset_backup(dataset_id: str) -> None:
     object_path, metadata_path = _paths(dataset_id)
     object_path.unlink(missing_ok=True)

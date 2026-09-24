@@ -24,6 +24,10 @@ from backend.frontend_ui import router as frontend_router
 from backend.data_backup import (
     backup_encrypted_dataset,
     delete_dataset_backup,
+    stage_replacement_backup,
+    promote_replacement_backup,
+    _backup_root,
+    _atomic_write,
 )
 from backend.runtime_security import (
     SecurityHeadersMiddleware,
@@ -32,6 +36,7 @@ from backend.runtime_security import (
 
 from backend.recovery import (
     export_recovery_bundle,
+    migrate_recovery_bundle,
     recovery_backup_path,
     restore_recovery_bundle,
     snapshot_recovery_bundle,
@@ -1039,6 +1044,119 @@ def rotate_dataset_encryption_key(
     }
 
 
+@app.post("/datasets/{dataset_id}/remediate-key", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
+def remediate_compromised_dataset_key(dataset_id: str):
+    """Replace active ciphertext under a fresh key while retaining old pins until durable commit."""
+    recovery_backup_path()
+    journal_path = _backup_root() / f"{dataset_id}.remediation.json"
+    if not re.fullmatch(r"ds-[0-9a-f]{32}", dataset_id):
+        raise HTTPException(status_code=400, detail="Invalid dataset ID")
+
+    if journal_path.exists():
+        journal = json.loads(journal_path.read_text())
+    else:
+        current = json.loads(query("ReadDatasetPrivate", [dataset_id], "org1"))
+        if current.get("storageState") != "PRIVATE_READY":
+            raise HTTPException(status_code=409, detail="Dataset storage is not ready")
+        old_ciphertext = ipfs_cat(current["cid"])
+        if sha256_bytes(old_ciphertext) != current["sha256"] or not is_encrypted_dataset(old_ciphertext):
+            raise HTTPException(status_code=409, detail="Active encrypted dataset integrity failed")
+        plaintext = decrypt_bytes(dataset_id, old_ciphertext)
+        require_staging_capacity(len(plaintext) * 3 + 8 * 1024 * 1024)
+        before = load_dataset_key_metadata(dataset_id)
+        previous_version = int(before["activeKeyVersion"])
+        plain_path = create_secure_plaintext_temp()
+        encrypted_path = plain_path + ".medaes"
+        new_cid = None
+        rotated = False
+        try:
+            Path(plain_path).write_bytes(plaintext)
+            rotate_dataset_key(dataset_id)
+            rotated = True
+            new_version = previous_version + 1
+            new_sha = encrypt_file(dataset_id, Path(plain_path), Path(encrypted_path))
+            new_cid = ipfs_add_file(encrypted_path)
+            replicated = ipfs_cat(new_cid)
+            if sha256_bytes(replicated) != new_sha or decrypt_bytes(dataset_id, replicated) != plaintext:
+                raise RuntimeError("Replacement ciphertext verification failed")
+            stage_replacement_backup(dataset_id, Path(encrypted_path), new_cid, new_sha)
+            from backend.ethereum_ledger import _locator_commitment
+            from web3 import Web3
+            old_commitment = current["locatorCommitment"]
+            new_commitment = Web3.to_hex(_locator_commitment(new_cid, new_sha))
+            journal = {
+                "datasetId": dataset_id, "oldCid": current["cid"],
+                "oldSha256": current["sha256"], "newCid": new_cid,
+                "newSha256": new_sha, "oldCommitment": old_commitment,
+                "newCommitment": new_commitment,
+                "previousKeyVersion": previous_version,
+                "newKeyVersion": new_version,
+            }
+            _atomic_write(journal_path, (json.dumps(journal, sort_keys=True) + "\n").encode())
+        except Exception:
+            if not journal_path.exists():
+                if new_cid:
+                    ipfs_unpin(new_cid)
+                if rotated:
+                    rollback_dataset_key_rotation(dataset_id, previous_version, previous_version + 1)
+            raise
+        finally:
+            Path(plain_path).unlink(missing_ok=True)
+            Path(encrypted_path).unlink(missing_ok=True)
+
+    try:
+        public = json.loads(query("ReadDataset", [dataset_id], "org1"))
+        actual_commitment = public["locatorCommitment"].lower()
+        if actual_commitment == journal["oldCommitment"].lower():
+            try:
+                invoke("ReplaceDatasetCiphertext", [
+                    dataset_id, journal["oldCommitment"], journal["newCommitment"],
+                    str(journal["previousKeyVersion"]), str(journal["newKeyVersion"]),
+                ], "org1")
+            except HTTPException:
+                # The RPC response can be lost after commit. Preserve both
+                # ciphertext copies and reconcile on the next invocation.
+                pass
+            public = json.loads(query("ReadDataset", [dataset_id], "org1"))
+            actual_commitment = public["locatorCommitment"].lower()
+        if actual_commitment != journal["newCommitment"].lower():
+            raise HTTPException(status_code=503, detail={
+                "message": "Replacement transaction is unconfirmed",
+                "action": "Retry this remediation endpoint after checking ledger state",
+            })
+
+        invoke_private_org1("StoreDatasetLocatorPrivate", [dataset_id], {
+            "dataset_locator": {"cid": journal["newCid"], "sha256": journal["newSha256"]},
+        })
+        # Re-stage from replicated ciphertext so an interrupted promotion can
+        # resume even if the first staged file was already moved.
+        replicated = ipfs_cat(journal["newCid"])
+        if sha256_bytes(replicated) != journal["newSha256"]:
+            raise RuntimeError("Replacement IPFS object integrity failed")
+        staged_path = create_secure_plaintext_temp(suffix=".medaes")
+        try:
+            Path(staged_path).write_bytes(replicated)
+            stage_replacement_backup(dataset_id, Path(staged_path), journal["newCid"], journal["newSha256"])
+            promote_replacement_backup(dataset_id, journal["newCid"], journal["newSha256"])
+        finally:
+            Path(staged_path).unlink(missing_ok=True)
+        recovery = snapshot_recovery_bundle()
+        ipfs_unpin(journal["oldCid"])
+        journal_path.unlink(missing_ok=True)
+        return {
+            "datasetId": dataset_id, "previousKeyVersion": journal["previousKeyVersion"],
+            "activeKeyVersion": journal["newKeyVersion"], "storageState": "PRIVATE_READY",
+            "locatorCommitment": journal["newCommitment"], "recoveryBackup": recovery,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={
+            "message": "Replacement is staged or committed but finalization is incomplete",
+            "action": "Retry the remediation endpoint; do not remove either encrypted copy",
+        }) from exc
+
+
 @app.post("/admin/recovery/snapshot", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
 def create_recovery_snapshot():
     try:
@@ -1102,6 +1220,30 @@ def restore_recovery_snapshot(
             status_code=500,
             detail="Recovery restore failed; verify backup and deployment state",
         ) from exc
+
+
+@app.post("/admin/recovery/migrate", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
+def migrate_recovery_snapshot(
+    backup: UploadFile = File(...),
+    source_rpc_url: str = Form(...),
+    source_chain_id: int = Form(...),
+    source_contract_address: str = Form(...),
+):
+    bundle = backup.file.read(64 * 1024 * 1024 + 1)
+    if len(bundle) > 64 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Migration bundle exceeds 64 MiB")
+    try:
+        return migrate_recovery_bundle(
+            bundle, source_rpc_url=source_rpc_url,
+            source_chain_id=source_chain_id,
+            source_contract_address=source_contract_address,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=(
+            "Migration is incomplete; preserve source backup and retry after checking destination ledger state"
+        )) from exc
 
 
 @app.post("/requests/prepare")
