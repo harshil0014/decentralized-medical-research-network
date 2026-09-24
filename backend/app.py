@@ -9,6 +9,8 @@ import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, File, Form
 from pydantic import BaseModel
+from eth_account import Account
+from eth_account.messages import encode_defunct
 
 from backend.api_auth import (
     AuthIdentity,
@@ -118,14 +120,42 @@ def _public_text_commitment(value: str, label: str) -> str:
     return "sha256:" + hashlib.sha256(clean.encode("utf-8")).hexdigest()
 
 
-class AccessRequestInput(BaseModel):
-    request_id: str | None = None
+class AccessRequestPrepareInput(BaseModel):
     dataset_id: str
     purpose: str
 
 
+class AccessRequestInput(BaseModel):
+    request_id: str
+    dataset_id: str
+    purpose: str
+    signature: str
+
+
 class ConsentUpdateInput(BaseModel):
     consent_state: str
+
+
+def _verify_researcher_signature(
+    identity: AuthIdentity,
+    digest: str,
+    signature: str,
+) -> None:
+    expected = (identity.wallet_address or "").lower()
+    if not expected:
+        raise HTTPException(status_code=403, detail="External researcher wallet is not configured")
+    try:
+        recovered = Account.recover_message(
+            encode_defunct(hexstr=digest),
+            signature=signature,
+        ).lower()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid researcher wallet signature") from exc
+    if recovered != expected:
+        raise HTTPException(
+            status_code=403,
+            detail="Signature does not match the authenticated researcher wallet",
+        )
 
 
 def _public_request_record(raw: str):
@@ -193,7 +223,7 @@ def auth_me(
     result = {
         "authenticated": True,
         "role": identity.role,
-        "authMode": "service-token",
+        "authMode": "service-token + external-wallet-signature",
         "plaintextDownloadsEnabled": _plaintext_downloads_enabled(),
     }
 
@@ -1137,9 +1167,9 @@ def restore_recovery_snapshot(
         ) from exc
 
 
-@app.post("/requests", dependencies=[Depends(require_mutation_lock)])
-def create_request(
-    body: AccessRequestInput,
+@app.post("/requests/prepare")
+def prepare_request_signature(
+    body: AccessRequestPrepareInput,
     identity: AuthIdentity = Depends(require_researcher),
 ):
     request_id = _opaque_request_id()
@@ -1147,14 +1177,63 @@ def create_request(
     purpose_commitment = _public_text_commitment(body.purpose, "purpose")
     actor_org = researcher_org(identity)
 
-    invoke(
-        "RequestAccess",
+    digest = query(
+        "ResearcherRequestDigest",
         [request_id, dataset_id, purpose_commitment],
         actor_org,
     )
 
+    return {
+        "requestId": request_id,
+        "datasetId": dataset_id,
+        "purposeCommitment": purpose_commitment,
+        "signingDigest": digest,
+        "ethereumAddress": identity.wallet_address,
+        "signatureScheme": "EIP-191 personal_sign",
+    }
+
+
+@app.post("/requests", dependencies=[Depends(require_mutation_lock)])
+def create_request(
+    body: AccessRequestInput,
+    identity: AuthIdentity = Depends(require_researcher),
+):
+    request_id = body.request_id.strip()
+    if not OPAQUE_REQUEST_ID_PATTERN.fullmatch(request_id):
+        raise HTTPException(
+            status_code=400,
+            detail="request_id must be the opaque value returned by /requests/prepare",
+        )
+    dataset_id = _validate_opaque_dataset_id(body.dataset_id)
+    purpose_commitment = _public_text_commitment(body.purpose, "purpose")
+    actor_org = researcher_org(identity)
+
+    digest = query(
+        "ResearcherRequestDigest",
+        [request_id, dataset_id, purpose_commitment],
+        actor_org,
+    )
+    _verify_researcher_signature(
+        identity,
+        digest,
+        body.signature,
+    )
+
+    invoke(
+        "RequestAccessSigned",
+        [request_id, dataset_id, purpose_commitment, body.signature],
+        "org1",
+    )
+
     raw = query("ReadAccessRequest", [request_id], actor_org)
     record = _public_request_record(raw)
+    if str(record.get("requesterAddress") or "").lower() != (
+        identity.wallet_address or ""
+    ).lower():
+        raise HTTPException(
+            status_code=409,
+            detail="Ethereum researcher identity does not match authenticated wallet",
+        )
     record["researcherId"] = identity.researcher_id
     return record
 
