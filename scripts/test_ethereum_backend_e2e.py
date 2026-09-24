@@ -90,9 +90,9 @@ assert upload.json()["metadataSummary"].startswith("sha256:")
 assert "Synthetic glucose cohort" not in upload.json()["metadataSummary"]
 
 key_files = sorted((runtime / "keys").glob("*.key"))
-assert len(key_files) == 1
-assert key_files[0].read_bytes().startswith(b"MEDKEY01")
-assert len(key_files[0].read_bytes()) > 32
+assert len(key_files) == 3
+assert all(path.read_bytes().startswith(b"MEDKEY01") for path in key_files)
+assert all(len(path.read_bytes()) > 32 for path in key_files)
 
 preview = client.get(
     f"/datasets/{dataset_id}/preview",
