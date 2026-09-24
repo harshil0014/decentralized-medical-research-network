@@ -2,6 +2,7 @@ const state = {
   token: sessionStorage.getItem("medical_token") || "",
   role: sessionStorage.getItem("medical_role") || "",
   datasets: [],
+  plaintextDownloadsEnabled: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -82,6 +83,7 @@ async function login() {
   try {
     const me = await apiJson("/auth/me");
     state.role = me.role;
+    state.plaintextDownloadsEnabled = me.plaintextDownloadsEnabled === true;
     sessionStorage.setItem("medical_token", state.token);
     sessionStorage.setItem("medical_role", state.role);
     openApp();
@@ -96,6 +98,7 @@ function logout() {
   sessionStorage.removeItem("medical_role");
   state.token = "";
   state.role = "";
+  state.plaintextDownloadsEnabled = false;
   $("appView").classList.add("hidden");
   $("loginView").classList.remove("hidden");
   $("tokenInput").value = "";
@@ -332,7 +335,7 @@ function buildRequestLookupCard() {
       button("Approve", () => decideRequest("approve"), "primary"),
       button("Revoke", () => decideRequest("revoke"), "danger"),
     );
-  } else {
+  } else if (state.plaintextDownloadsEnabled) {
     actions.append(button("Download", downloadRequest));
   }
 
