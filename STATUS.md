@@ -16,7 +16,9 @@
 
 - Dataset descriptions and research purposes are SHA-256 committed before immutable on-chain storage, and Solidity validates the commitment format.
 - DICOM free-text Study/Series/Protocol descriptions are removed before encrypted storage.
-- DICOM sanitization recursively removes configured identifiers, free-text risk fields, private tags and overlays, remaps identity UIDs, clears risky file-meta fields and zeros the Part 10 preamble.
+- DICOM sanitization applies the PS3.15 2024b header rule table plus stricter free-text/private-tag/overlay cleanup and UID remapping.
+- CT/MR upload fails closed unless BurnedInAnnotation=NO, RecognizableVisualFeatures=NO, and the Hospital supplies an explicit pixel-review attestation.
+- Researcher plaintext dataset download is disabled by default; the normal access path is HE/compute-to-data.
 - DICOM SEG analysis requires independent authorization for both the source image dataset and SEG dataset.
 - HE compute and Hospital decryption re-check all required active grants and dataset consent.
 
@@ -27,7 +29,7 @@ This remains a research prototype:
 - service tokens instead of per-person OIDC/wallet identities
 - local Ganache rather than a public/consortium production network
 - local key files rather than KMS/HSM
-- DICOM sanitization is not a full PS3.15 compliance implementation
+- header de-identification follows the PS3.15 2024b rule table, but full clinical de-identification/compliance still requires appropriate pixel review and governance
 - key rotation does not retroactively re-encrypt existing IPFS ciphertext
 
 ## Validation
