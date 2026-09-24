@@ -17,14 +17,17 @@ Hyperledger Fabric is not used by the active runtime. Historical Fabric-era sour
 
 ```text
 Hospital
+  -> RAM-backed plaintext staging only (tmpfs/ramfs)
   -> de-identification / validation
   -> AES-256-GCM encryption
   -> IPFS encrypted object
   -> hospital-local private CID/SHA metadata
   -> SHA-256 locator commitment on Ethereum
   -> Solidity dataset registry + consent
+  -> encrypted recovery snapshot refreshed at configured external destination
 
 Researcher
+  -> authenticates with an individual service token mapped to a distinct Ethereum wallet
   -> sees discovery metadata
   -> requests access on Ethereum
   -> Hospital approves on Ethereum
@@ -90,14 +93,41 @@ docker run -d --name medical-ipfs \
   ipfs/kubo:v0.43.1
 ```
 
-Provide a 32-byte dataset-key wrapping secret from outside the repository/key directory, then create API tokens and localhost TLS and start:
+Create one Hospital token and one token file per researcher, then map each researcher to a distinct Ganache wallet index:
 
 ```bash
-export MEDICAL_MASTER_KEY_HEX="$(openssl rand -hex 32)"
+AUTH=/root/.medical-registry
+mkdir -p "$AUTH"
+chmod 700 "$AUTH"
+
+openssl rand -hex 32 > "$AUTH/hospital_api.token"
+openssl rand -hex 32 > "$AUTH/researcher_a.token"
+openssl rand -hex 32 > "$AUTH/researcher_b.token"
+chmod 600 "$AUTH"/*.token
+
+cat > "$AUTH/researchers.json" <<'JSON'
+{
+  "schemaVersion": 1,
+  "researchers": [
+    {"id": "researcher-a", "tokenFile": "researcher_a.token", "walletIndex": 1},
+    {"id": "researcher-b", "tokenFile": "researcher_b.token", "walletIndex": 2}
+  ]
+}
+JSON
+chmod 600 "$AUTH/researchers.json"
+```
+
+Ganache wallet index 0 is reserved for the Hospital. Researcher wallet indexes 1 through 9 are available, and duplicate researcher IDs, tokens, or wallet indexes are rejected at API startup.
+
+The dataset-key wrapping secret must be **persistent across restarts** and supplied from outside the repository/key directory. Do not generate a new value every time the API starts. Also configure a recovery bundle destination outside the dataset-key directory, preferably on a separately backed-up or mounted volume:
+
+```bash
+export MEDICAL_MASTER_KEY_HEX="<persistent 64-hex secret from your secret manager>"
+export MEDICAL_RECOVERY_BACKUP_PATH="/mnt/medical-recovery/medical-recovery.medrec"
 ./scripts/start_secure_api.sh
 ```
 
-The application never writes this master key to its dataset-key directory. Dataset AES keys are stored there only as AES-256-GCM-wrapped `MEDKEY01` blobs. For a real deployment, inject the wrapping secret from a secrets manager/KMS/HSM rather than generating it ad hoc in a shell session.
+The secure launcher and the FastAPI process force multipart/plaintext staging onto verified Linux `tmpfs`/`ramfs` storage (default `/dev/shm/medical-registry-plaintext`). The application never writes the master key to its dataset-key directory. Dataset AES keys are stored there only as AES-256-GCM-wrapped `MEDKEY01` blobs.
 
 Open:
 
@@ -125,7 +155,7 @@ The contract implements:
 - encrypted-computation provenance
 - final-decryption provenance
 
-The Hospital is Ganache account 0. The Researcher is Ganache account 1.
+The Hospital is Ganache account 0. Individual researcher identities are assigned distinct Ganache accounts 1 through 9 through `/root/.medical-registry/researchers.json`.
 
 ## Private locator design
 
@@ -178,6 +208,10 @@ It covers:
 13. HE SUM decryption
 14. request revocation
 15. dataset consent revocation
+16. two independent researcher tokens map to different Ethereum wallets
+17. cross-researcher download/HE use is rejected
+18. medical upload staging is RAM-backed
+19. encrypted recovery-bundle authentication, destructive key/locator loss, and verified restore
 
 The GitHub Actions workflow `.github/workflows/ethereum-e2e.yml` executes the same migration path on every push to the migration branch.
 
@@ -196,6 +230,14 @@ Researcher plaintext download is disabled by default. For an explicitly controll
 - Consent/access is re-checked before researcher computation **and again before Hospital decryption**.
 - Revoking either required grant blocks further computation/decryption.
 
+## Plaintext staging
+
+Medical uploads are fail-closed unless a RAM-backed staging filesystem is available. The process verifies `tmpfs`/`ramfs`, points Python/Starlette multipart temp storage there, and also creates the application staging file there. Normal-disk deletion is therefore not relied on as a PHI-erasure mechanism.
+
+## Researcher identity isolation
+
+Each configured researcher has a unique service token, researcher ID, and Ganache wallet index. Access requests are signed by that identity's wallet. HE computation and controlled plaintext-release checks verify that the authenticated researcher's wallet matches the request/job researcher. The Solidity contract independently enforces the researcher address recorded on the HE job.
+
 ## Dataset-key protection
 
 Dataset AES keys are not stored as raw 32-byte files. Each key generation is wrapped with AES-256-GCM using the externally supplied `MEDICAL_MASTER_KEY_HEX`. Legacy raw key files are migrated atomically to the wrapped `MEDKEY01` format on first successful load. Key files and metadata remain Hospital-local with restrictive permissions.
@@ -203,3 +245,10 @@ Dataset AES keys are not stored as raw 32-byte files. Each key generation is wra
 ## Key rotation semantics
 
 Dataset key rotation creates a new active AES key generation for future encrypted objects while retaining historical generations as DECRYPT_ONLY so existing immutable IPFS ciphertext remains readable. It is **version rotation**, not retroactive re-encryption. If an old key is suspected compromised, the affected ciphertext must be re-encrypted and republished under a new dataset/version; rotating metadata alone does not remediate historical ciphertext.
+
+
+## Disaster recovery
+
+Successful dataset registration and key rotation automatically refresh an encrypted `MEDREC01` recovery bundle at `MEDICAL_RECOVERY_BACKUP_PATH`. The bundle contains the wrapped dataset-key registry and Hospital-private CID/SHA locators, is AES-GCM authenticated under a recovery key derived from the external master secret, and is bound to the current Ethereum chain ID and contract address.
+
+Hospital-only recovery endpoints support snapshot, encrypted export, and transactional restore. Restore validates bundle authentication, file hashes, chain/contract identity, dataset-key metadata and every restored private locator commitment against Ethereum. A failed verification rolls the local restore back. Keep the configured recovery path in a separate backup failure domain; software cannot protect against losing the external master secret and every copy of the recovery bundle simultaneously.
