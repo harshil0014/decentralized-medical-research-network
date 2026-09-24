@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from backend.he_service import (
+    RUNTIME_ROOT,
     _ipfs_add_file,
     _ipfs_cat_artifact,
 )
@@ -15,7 +16,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BUILD_DIR = PROJECT_ROOT / "seal_demo" / "build"
 RESEARCHER_SUM = BUILD_DIR / "researcher_sum"
 HOSPITAL_DECRYPT_SUM = BUILD_DIR / "hospital_decrypt_sum"
-RUNTIME_ROOT = Path("/tmp/medical-he-jobs")
 JOB_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
