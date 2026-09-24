@@ -161,6 +161,7 @@ function buildUploadCard() {
     <input class="full" name="metadata_summary" placeholder="Metadata" required>
     <select name="consent_state"><option>ACTIVE</option><option>REVOKED</option></select>
     <input name="file" type="file" required>
+    <label class="full"><input name="visual_phi_reviewed" type="checkbox" value="true"> CT/MR pixel data visually reviewed; no burned-in identifiers or recognizable features remain</label>
     <div class="full form-actions"><button class="primary" type="submit">Upload</button></div>
   `;
 
