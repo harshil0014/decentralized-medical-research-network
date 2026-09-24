@@ -52,7 +52,8 @@ app.include_router(frontend_router)
 
 REPO = Path(__file__).resolve().parents[1]
 
-PUBLIC_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+OPAQUE_DATASET_ID_PATTERN = re.compile(r"^ds-[0-9a-f]{32}$")
+OPAQUE_REQUEST_ID_PATTERN = re.compile(r"^req-[0-9a-f]{32}$")
 DATA_TYPE_PATTERN = re.compile(r"^[A-Z0-9_:-]{1,64}$")
 
 
@@ -63,12 +64,20 @@ def _plaintext_downloads_enabled() -> bool:
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _validate_public_id(value: str, label: str) -> str:
+def _opaque_dataset_id() -> str:
+    return "ds-" + uuid.uuid4().hex
+
+
+def _opaque_request_id() -> str:
+    return "req-" + uuid.uuid4().hex
+
+
+def _validate_opaque_dataset_id(value: str) -> str:
     clean = (value or "").strip()
-    if not PUBLIC_ID_PATTERN.fullmatch(clean):
+    if not OPAQUE_DATASET_ID_PATTERN.fullmatch(clean):
         raise HTTPException(
             status_code=400,
-            detail=f"{label} must be 1-64 safe non-identifying characters",
+            detail="dataset_id must be an opaque server-issued ds- identifier",
         )
     return clean
 
@@ -83,7 +92,7 @@ def _public_text_commitment(value: str, label: str) -> str:
 
 
 class AccessRequestInput(BaseModel):
-    request_id: str
+    request_id: str | None = None
     dataset_id: str
     purpose: str
 
@@ -191,6 +200,9 @@ def upload_dataset(
     ledger_registered = False
     preserve_assets = False
 
+    client_dataset_label = (dataset_id or "").strip()
+    dataset_id = _opaque_dataset_id()
+
     try:
         already_exists = (
             query(
@@ -228,7 +240,13 @@ def upload_dataset(
 
         digest = sha256.hexdigest()
 
-        dataset_id = _validate_public_id(dataset_id, "dataset_id")
+        # The caller-supplied label is intentionally never written to Ethereum.
+        # Ethereum receives only the opaque server-generated dataset ID.
+        if len(client_dataset_label) > 256:
+            raise HTTPException(
+                status_code=400,
+                detail="dataset label is too long",
+            )
 
         # DICOM series ZIPs are de-identified BEFORE hashing and BEFORE IPFS storage.
         if suffix.lower() == ".zip":
@@ -965,8 +983,8 @@ def rotate_dataset_encryption_key(
 
 @app.post("/requests", dependencies=[Depends(require_researcher), Depends(require_mutation_lock)])
 def create_request(body: AccessRequestInput):
-    request_id = _validate_public_id(body.request_id, "request_id")
-    dataset_id = _validate_public_id(body.dataset_id, "dataset_id")
+    request_id = _opaque_request_id()
+    dataset_id = _validate_opaque_dataset_id(body.dataset_id)
     purpose_commitment = _public_text_commitment(body.purpose, "purpose")
 
     invoke(
