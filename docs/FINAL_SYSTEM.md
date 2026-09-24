@@ -30,9 +30,9 @@ DICOM SEG jobs require **two independently approved grants**: one for the source
 
 ## Ethereum stores
 
-- dataset ID, type, owner wallet, consent/storage state
+- opaque server-issued dataset ID, type, owner wallet, consent/storage state
 - SHA-256 commitment of the submitted dataset description
-- access request ID and SHA-256 purpose commitment
+- opaque server-issued access request ID and SHA-256 purpose commitment
 - access decisions
 - locator commitment
 - key-rotation audit records
@@ -50,9 +50,14 @@ DICOM SEG jobs require **two independently approved grants**: one for the source
 - arbitrary plaintext dataset description
 - decrypted aggregate
 
+## Identifier privacy
+
+FastAPI generates `ds-<32 hex>` and `req-<32 hex>` identifiers. Caller-provided dataset labels and request labels are not written to Ethereum. Solidity independently rejects IDs that do not match the opaque formats.
+
 ## Security boundaries
 
-- AES keys and private dataset locator metadata remain Hospital-local.
+- dataset AES keys remain Hospital-local only as AES-256-GCM-wrapped `MEDKEY01` blobs; the wrapping key is supplied externally through `MEDICAL_MASTER_KEY_HEX` and is never written by the application.
+- private dataset locator metadata remains Hospital-local.
 - Existing ciphertext keeps the key generation used at encryption time. Rotation creates a new active generation but does not rewrite old IPFS objects.
 - Service-token identities and the single-Hospital/single-Researcher local wallet mapping are prototype constraints, not a production decentralization model.
 - DICOM sanitization is not a formal HIPAA/GDPR/DPDP compliance claim.
