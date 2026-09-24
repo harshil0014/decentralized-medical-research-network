@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import time
+import uuid
 
 root = tempfile.mkdtemp(prefix="medical-eth-adapter-")
 os.environ["MEDICAL_REGISTRY_AUTH_DIR"] = root
@@ -27,8 +28,8 @@ from backend.ethereum_ledger import (  # noqa: E402
 )
 
 suffix = str(int(time.time() * 1000))
-dataset_id = f"PY-E2E-{suffix}"
-request_id = f"PY-REQ-{suffix}"
+dataset_id = "ds-" + uuid.uuid4().hex
+request_id = "req-" + uuid.uuid4().hex
 job_id = f"PY-JOB-{suffix}"
 
 state = health()
