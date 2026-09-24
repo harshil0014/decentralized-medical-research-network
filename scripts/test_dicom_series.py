@@ -8,6 +8,7 @@ from pydicom.sequence import Sequence
 from pydicom.uid import ExplicitVRLittleEndian, MRImageStorage, generate_uid
 
 from backend.dicom_series import deidentify_dicom_series_zip
+from backend.dicom_utils import deidentify_dataset
 
 
 SENTINEL = "PHI-SENTINEL-DO-NOT-KEEP"
@@ -89,6 +90,8 @@ with tempfile.TemporaryDirectory() as tmp:
         ds.add_new((0x0011, 0x1010), "LO", SENTINEL)
 
         ds.Modality = "MR"
+        ds.BurnedInAnnotation = "NO"
+        ds.RecognizableVisualFeatures = "NO"
         ds.InstanceNumber = i
         ds.Rows = 2
         ds.Columns = 2
@@ -105,7 +108,33 @@ with tempfile.TemporaryDirectory() as tmp:
         for item in sorted(raw_dir.glob("*.dcm")):
             archive.write(item, arcname=item.name)
 
-    result = deidentify_dicom_series_zip(zip_path)
+    # CT/MR pixel handling is fail-closed: both DICOM flags and an explicit
+    # Hospital visual review attestation are required.
+    missing_attestation = Dataset()
+    missing_attestation.Modality = "CT"
+    missing_attestation.BurnedInAnnotation = "NO"
+    missing_attestation.RecognizableVisualFeatures = "NO"
+    try:
+        deidentify_dataset(missing_attestation)
+    except ValueError as exc:
+        assert "visual_phi_reviewed=true" in str(exc)
+    else:
+        raise AssertionError("CT/MR without visual review attestation must be rejected")
+
+    missing_flag = Dataset()
+    missing_flag.Modality = "MR"
+    missing_flag.BurnedInAnnotation = "NO"
+    try:
+        deidentify_dataset(missing_flag, visual_phi_reviewed=True)
+    except ValueError as exc:
+        assert "RecognizableVisualFeatures=NO" in str(exc)
+    else:
+        raise AssertionError("CT/MR with unknown visual-feature status must be rejected")
+
+    result = deidentify_dicom_series_zip(
+        zip_path,
+        visual_phi_reviewed=True,
+    )
 
     clean = []
     with ZipFile(zip_path, "r") as archive:
