@@ -51,8 +51,6 @@ def _deployment() -> dict[str, Any]:
         "rpcUrl",
         "contractAddress",
         "hospitalAddress",
-        "researcherAddress",
-        "researcherAddresses",
         "abiPath",
     }
     missing = sorted(required - data.keys())
@@ -93,26 +91,15 @@ def _account(org: str) -> str:
         return Web3.to_checksum_address(data["hospitalAddress"])
 
     if org == "org2":
-        return Web3.to_checksum_address(data["researcherAddress"])
+        # Read-only compatibility caller; no researcher transaction is ever
+        # signed by the backend.
+        return Web3.to_checksum_address(data["hospitalAddress"])
 
-    if org.startswith("researcher:"):
-        raw_index = org.split(":", 1)[1]
-
-        try:
-            wallet_index = int(raw_index)
-        except ValueError as exc:
-            raise ValueError(f"Invalid researcher role: {org}") from exc
-
-        addresses = data.get("researcherAddresses") or []
-
-        if not 1 <= wallet_index <= len(addresses):
-            raise ValueError(
-                f"Researcher wallet index {wallet_index} is unavailable"
-            )
-
-        return Web3.to_checksum_address(
-            addresses[wallet_index - 1]
-        )
+    if org.startswith("researcher-address:"):
+        raw_address = org.split(":", 1)[1]
+        if not Web3.is_address(raw_address):
+            raise ValueError(f"Invalid researcher address role: {org}")
+        return Web3.to_checksum_address(raw_address)
 
     raise ValueError(f"Unknown role: {org}")
 
@@ -127,13 +114,6 @@ def _org_name(address: str) -> str:
 
     if value == data["hospitalAddress"].lower():
         return "Org1MSP"
-
-    for index, researcher_address in enumerate(
-        data.get("researcherAddresses") or [],
-        start=1,
-    ):
-        if value == researcher_address.lower():
-            return f"Researcher:{index}"
 
     return address
 
@@ -285,8 +265,7 @@ def health() -> dict[str, Any]:
         "blockNumber": w3.eth.block_number,
         "contractAddress": data["contractAddress"],
         "hospitalAddress": data["hospitalAddress"],
-        "researcherAddress": data["researcherAddress"],
-        "researcherAddresses": data["researcherAddresses"],
+        "researcherSigning": "external-eip191",
     }
 
 
@@ -353,8 +332,12 @@ def invoke(function: str, args: list[str], org: str) -> None:
         _send("updateConsent", args[:2], org)
         return
 
-    if function == "RequestAccess":
-        _send("requestAccess", args[:3], org)
+    if function == "RequestAccessSigned":
+        _send(
+            "requestAccessBySig",
+            [args[0], args[1], args[2], bytes.fromhex(args[3].removeprefix("0x"))],
+            "org1",
+        )
         return
 
     if function == "DecideAccess":
@@ -387,8 +370,17 @@ def invoke(function: str, args: list[str], org: str) -> None:
         )
         return
 
-    if function == "RecordHEComputation":
-        _send("recordHEComputation", args[:3], org)
+    if function == "RecordHEComputationSigned":
+        _send(
+            "recordHEComputationBySig",
+            [
+                args[0],
+                args[1],
+                args[2],
+                bytes.fromhex(args[3].removeprefix("0x")),
+            ],
+            "org1",
+        )
         return
 
     if function == "RecordHEDecryption":
@@ -461,6 +453,22 @@ def query(function: str, args: list[str], org: str = "org2") -> str:
                 "value": value,
             })
         return json.dumps(history)
+
+    if function == "ResearcherRequestDigest":
+        value = _call(
+            "researcherRequestDigest",
+            args[:3],
+            org,
+        )
+        return Web3.to_hex(value)
+
+    if function == "HEComputeDigest":
+        value = _call(
+            "heComputeDigest",
+            args[:1],
+            org,
+        )
+        return Web3.to_hex(value)
 
     if function == "ReadAccessRequest":
         return json.dumps(
