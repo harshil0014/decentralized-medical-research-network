@@ -66,6 +66,8 @@ await sendTx(
   jobId,
   datasetId,
   requestId,
+  "",
+  "",
   "glucose_mg_dl",
   4,
   "bafy-ciphertext",
@@ -84,6 +86,28 @@ await sendTx(hospitalContract, "recordHEDecryption", jobId);
 job = await hospitalContract.getHEJob(jobId);
 assert.equal(job.status, "DECRYPTED");
 
+const revokedJobId = jobId + "-REVOKE";
+await sendTx(
+  hospitalContract,
+  "registerHEJob",
+  revokedJobId,
+  datasetId,
+  requestId,
+  "",
+  "",
+  "glucose_mg_dl",
+  4,
+  "bafy-ciphertext-revoke",
+  fakeSha
+);
+await sendTx(
+  researcherContract,
+  "recordHEComputation",
+  revokedJobId,
+  "bafy-result-revoke",
+  fakeResultSha
+);
+
 const dHist = await hospitalContract.getDatasetHistory(datasetId);
 const aHist = await hospitalContract.getAccessHistory(requestId);
 const hHist = await hospitalContract.getHEJobHistory(jobId);
@@ -93,6 +117,14 @@ assert(hHist.length >= 3);
 
 await sendTx(hospitalContract, "decideAccess", requestId, "REVOKED");
 assert.equal(await hospitalContract.canAccess(requestId), false);
+
+let decryptAfterRevokeBlocked = false;
+try {
+  await sendTx(hospitalContract, "recordHEDecryption", revokedJobId);
+} catch (_) {
+  decryptAfterRevokeBlocked = true;
+}
+assert.equal(decryptAfterRevokeBlocked, true);
 
 await sendTx(hospitalContract, "updateConsent", datasetId, "REVOKED");
 assert.equal(await hospitalContract.canAccess(requestId), false);

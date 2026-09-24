@@ -44,6 +44,8 @@ contract MedicalResearchRegistry {
         string jobId;
         string datasetId;
         string requestId;
+        string secondaryDatasetId;
+        string secondaryRequestId;
         string metric;
         uint256 cohortSize;
         string ciphertextCid;
@@ -322,6 +324,8 @@ contract MedicalResearchRegistry {
         string calldata jobId,
         string calldata datasetId,
         string calldata requestId,
+        string calldata secondaryDatasetId,
+        string calldata secondaryRequestId,
         string calldata metric,
         uint256 cohortSize,
         string calldata ciphertextCid,
@@ -337,10 +341,22 @@ contract MedicalResearchRegistry {
         require(_eq(req.status, "APPROVED"), "request not approved");
         require(canAccess(requestId), "access not active");
 
+        if (bytes(secondaryDatasetId).length > 0 || bytes(secondaryRequestId).length > 0) {
+            require(bytes(secondaryDatasetId).length > 0, "secondary dataset required");
+            require(bytes(secondaryRequestId).length > 0, "secondary request required");
+            AccessRequest storage secondaryReq = requests[secondaryRequestId];
+            require(secondaryReq.exists, "secondary request missing");
+            require(_eq(secondaryReq.datasetId, secondaryDatasetId), "secondary request dataset mismatch");
+            require(secondaryReq.requester == req.requester, "secondary requester mismatch");
+            require(canAccess(secondaryRequestId), "secondary access not active");
+        }
+
         heJobs[jobId] = HEJobRecord({
             jobId: jobId,
             datasetId: datasetId,
             requestId: requestId,
+            secondaryDatasetId: secondaryDatasetId,
+            secondaryRequestId: secondaryRequestId,
             metric: metric,
             cohortSize: cohortSize,
             ciphertextCid: ciphertextCid,
@@ -375,6 +391,9 @@ contract MedicalResearchRegistry {
         require(msg.sender == job.researcher, "approved researcher only");
         require(_eq(job.status, "ENCRYPTED"), "HE job not encrypted");
         require(canAccess(job.requestId), "access no longer active");
+        if (bytes(job.secondaryRequestId).length > 0) {
+            require(canAccess(job.secondaryRequestId), "secondary access no longer active");
+        }
 
         job.resultCid = resultCid;
         job.resultSha256 = resultSha256;
@@ -388,6 +407,10 @@ contract MedicalResearchRegistry {
         HEJobRecord storage job = heJobs[jobId];
         require(job.exists, "HE job missing");
         require(_eq(job.status, "COMPUTED"), "HE job not computed");
+        require(canAccess(job.requestId), "access no longer active");
+        if (bytes(job.secondaryRequestId).length > 0) {
+            require(canAccess(job.secondaryRequestId), "secondary access no longer active");
+        }
 
         job.status = "DECRYPTED";
         job.decryptedAt = uint64(block.timestamp);

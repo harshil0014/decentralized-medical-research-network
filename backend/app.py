@@ -2,6 +2,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import uuid
@@ -50,6 +51,29 @@ app.add_middleware(
 app.include_router(frontend_router)
 
 REPO = Path(__file__).resolve().parents[1]
+
+PUBLIC_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+DATA_TYPE_PATTERN = re.compile(r"^[A-Z0-9_:-]{1,64}$")
+
+
+def _validate_public_id(value: str, label: str) -> str:
+    clean = (value or "").strip()
+    if not PUBLIC_ID_PATTERN.fullmatch(clean):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} must be 1-64 safe non-identifying characters",
+        )
+    return clean
+
+
+def _public_text_commitment(value: str, label: str) -> str:
+    clean = (value or "").strip()
+    if not clean:
+        raise HTTPException(status_code=400, detail=f"{label} is required")
+    if len(clean) > 4096:
+        raise HTTPException(status_code=400, detail=f"{label} is too long")
+    return "sha256:" + hashlib.sha256(clean.encode("utf-8")).hexdigest()
+
 
 class AccessRequestInput(BaseModel):
     request_id: str
@@ -195,6 +219,8 @@ def upload_dataset(
 
         digest = sha256.hexdigest()
 
+        dataset_id = _validate_public_id(dataset_id, "dataset_id")
+
         # DICOM series ZIPs are de-identified BEFORE hashing and BEFORE IPFS storage.
         if suffix.lower() == ".zip":
             try:
@@ -213,8 +239,6 @@ def upload_dataset(
             parts = ["De-identified DICOM series"]
             for key in (
                 "modality",
-                "study_description",
-                "series_description",
                 "rows",
                 "columns",
                 "slice_count",
@@ -249,8 +273,6 @@ def upload_dataset(
             parts = ["De-identified DICOM"]
             for key in (
                 "modality",
-                "study_description",
-                "series_description",
                 "rows",
                 "columns",
             ):
@@ -269,10 +291,25 @@ def upload_dataset(
                 detail="data_type is required for non-DICOM uploads",
             )
 
+        data_type = data_type.strip().upper()
+        if not DATA_TYPE_PATTERN.fullmatch(data_type):
+            raise HTTPException(
+                status_code=400,
+                detail="data_type must use only A-Z, 0-9, _, : or -",
+            )
+
         if not metadata_summary:
             raise HTTPException(
                 status_code=400,
                 detail="metadata_summary is required for non-DICOM uploads",
+            )
+
+        if suffix.lower() in {".zip", ".dcm", ".dicom"}:
+            ledger_metadata_summary = metadata_summary
+        else:
+            ledger_metadata_summary = _public_text_commitment(
+                metadata_summary,
+                "metadata_summary",
             )
 
         # Encrypt the final de-identified/validated medical object
@@ -347,7 +384,7 @@ def upload_dataset(
                 [
                     dataset_id,
                     data_type,
-                    metadata_summary,
+                    ledger_metadata_summary,
                     consent_state,
                 ],
                 "org1",
@@ -916,13 +953,17 @@ def rotate_dataset_encryption_key(
 
 @app.post("/requests", dependencies=[Depends(require_researcher), Depends(require_mutation_lock)])
 def create_request(body: AccessRequestInput):
+    request_id = _validate_public_id(body.request_id, "request_id")
+    dataset_id = _validate_public_id(body.dataset_id, "dataset_id")
+    purpose_commitment = _public_text_commitment(body.purpose, "purpose")
+
     invoke(
         "RequestAccess",
-        [body.request_id, body.dataset_id, body.purpose],
+        [request_id, dataset_id, purpose_commitment],
         "org2",
     )
 
-    raw = query("ReadAccessRequest", [body.request_id], "org2")
+    raw = query("ReadAccessRequest", [request_id], "org2")
     return _public_request_record(raw)
 
 

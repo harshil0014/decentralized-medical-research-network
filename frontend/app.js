@@ -600,6 +600,7 @@ function buildDicomEncryptCard() {
     <input name="col_start" type="number" min="0" placeholder="ROI col start">
     <input name="col_end" type="number" min="1" placeholder="ROI col end (exclusive)">
     <input name="segmentation_dataset_id" placeholder="DICOM SEG Dataset ID (DICOM_SEG only)">
+    <input name="segmentation_request_id" placeholder="Approved SEG Request ID (DICOM_SEG only)">
     <input name="segment_number" type="number" min="1" placeholder="Segment number (DICOM_SEG only)">
     <div class="full hint">DICOM SEG selects a hospital-side binary segment, then encrypts only its source CT/MR voxels. Raw-voxel mode limit: 262,144 selected voxels; use Block Stats for larger segments.</div>
     <div class="full form-actions"><button class="primary" type="submit">Encrypt DICOM</button></div>
@@ -642,10 +643,13 @@ function buildDicomEncryptCard() {
 
       if (scope === "DICOM_SEG") {
         const segId = String(fd.get("segmentation_dataset_id") || "").trim();
+        const segRequestId = String(fd.get("segmentation_request_id") || "").trim();
         const segmentRaw = String(fd.get("segment_number") || "").trim();
         if (!segId) throw new Error("DICOM SEG Dataset ID is required");
+        if (!segRequestId) throw new Error("Approved SEG Request ID is required");
         if (!segmentRaw) throw new Error("Segment number is required");
         payload.segmentation_dataset_id = segId;
+        payload.segmentation_request_id = segRequestId;
         payload.segment_number = Number(segmentRaw);
       }
 

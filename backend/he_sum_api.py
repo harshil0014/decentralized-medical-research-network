@@ -168,6 +168,11 @@ def decrypt_he_sum(job_id: str):
                 detail="HE job is not in COMPUTED state",
             )
 
+        _require_approved_access(
+            ledger["datasetId"],
+            ledger["requestId"],
+        )
+
         ciphertext_cid = ledger.get("ciphertextCid")
         result_cid = ledger.get("resultCid")
 

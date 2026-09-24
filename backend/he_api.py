@@ -233,6 +233,8 @@ def encrypt_glucose_cohort(
                     job_id,
                     payload.dataset_id,
                     payload.request_id,
+                    "",
+                    "",
                     payload.metric,
                     str(result["count"]),
                     ciphertext_cid,
@@ -534,6 +536,11 @@ def decrypt_he_average(
                 status_code=409,
                 detail="HE job is not in COMPUTED state",
             )
+
+        _require_approved_access(
+            ledger["datasetId"],
+            ledger["requestId"],
+        )
 
         ciphertext_cid = ledger.get(
             "ciphertextCid"

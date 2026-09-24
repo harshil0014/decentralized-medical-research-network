@@ -49,8 +49,6 @@ def deidentify_dicom_series_zip(path: str | Path) -> dict:
         original_study_uids: set[str] = set()
         original_series_uids: set[str] = set()
 
-        study_description = None
-        series_description = None
         rows = None
         columns = None
 
@@ -76,10 +74,6 @@ def deidentify_dicom_series_zip(path: str | Path) -> dict:
             if modality:
                 modalities.add(modality)
 
-            if study_description is None:
-                study_description = getattr(ds, "StudyDescription", None)
-            if series_description is None:
-                series_description = getattr(ds, "SeriesDescription", None)
             if rows is None:
                 rows = getattr(ds, "Rows", None)
             if columns is None:
@@ -113,8 +107,6 @@ def deidentify_dicom_series_zip(path: str | Path) -> dict:
 
         return {
             "modality": modality,
-            "study_description": str(study_description) if study_description else None,
-            "series_description": str(series_description) if series_description else None,
             "rows": int(rows) if rows is not None else None,
             "columns": int(columns) if columns is not None else None,
             "slice_count": len(cleaned),

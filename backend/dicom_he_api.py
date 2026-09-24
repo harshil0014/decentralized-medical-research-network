@@ -69,6 +69,7 @@ class DicomHEInput(BaseModel):
     slice_index: int | None = None
     roi_box: DicomROIBox | None = None
     segmentation_dataset_id: str | None = None
+    segmentation_request_id: str | None = None
     segment_number: int | None = None
 
 
@@ -173,11 +174,24 @@ def encrypt_dicom(payload: DicomHEInput):
                     status_code=400,
                     detail="segmentation_dataset_id is required for DICOM_SEG scope",
                 )
+            segmentation_request_id = str(
+                payload.segmentation_request_id or ""
+            ).strip()
+            if not segmentation_request_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="segmentation_request_id is required for DICOM_SEG scope",
+                )
             if payload.segment_number is None:
                 raise HTTPException(
                     status_code=400,
                     detail="segment_number is required for DICOM_SEG scope",
                 )
+
+            _require_approved_access(
+                segmentation_dataset_id,
+                segmentation_request_id,
+            )
 
             seg_dataset, seg_bytes, segmentation_storage_encryption, segmentation_sha256 = (
                 _load_private_dicom_dataset(segmentation_dataset_id)
@@ -194,6 +208,7 @@ def encrypt_dicom(payload: DicomHEInput):
                 payload.segment_number,
             )
             metadata["segmentation_dataset_id"] = segmentation_dataset_id
+            metadata["segmentation_request_id"] = segmentation_request_id
         else:
             roi_box = payload.roi_box.model_dump() if payload.roi_box else None
             values, metadata = extract_dicom_analysis_values(
@@ -221,6 +236,8 @@ def encrypt_dicom(payload: DicomHEInput):
                     job_id,
                     payload.dataset_id,
                     payload.request_id,
+                    metadata.get("segmentation_dataset_id") or "",
+                    metadata.get("segmentation_request_id") or "",
                     metric,
                     str(result["voxel_count"]),
                     ciphertext_cid,
@@ -247,6 +264,7 @@ def encrypt_dicom(payload: DicomHEInput):
                 "dataset_sha256": verified_sha256,
                 "dataset_storage_encryption": storage_encryption,
                 "segmentation_dataset_id": metadata.get("segmentation_dataset_id"),
+                "segmentation_request_id": metadata.get("segmentation_request_id"),
                 "segmentation_dataset_sha256_verified": (
                     segmentation_sha256 is not None
                 ),
@@ -318,6 +336,11 @@ def compute_dicom(job_id: str):
             raise HTTPException(status_code=409, detail="DICOM HE job is not in ENCRYPTED state")
 
         _require_approved_access(ledger["datasetId"], ledger["requestId"])
+        if ledger.get("secondaryRequestId"):
+            _require_approved_access(
+                ledger["secondaryDatasetId"],
+                ledger["secondaryRequestId"],
+            )
 
         restore_dicom_ciphertext_bundle(
             job_id,
@@ -379,6 +402,13 @@ def decrypt_dicom(job_id: str):
         _require_dicom_job(ledger)
         if ledger.get("status") != "COMPUTED":
             raise HTTPException(status_code=409, detail="DICOM HE job is not in COMPUTED state")
+
+        _require_approved_access(ledger["datasetId"], ledger["requestId"])
+        if ledger.get("secondaryRequestId"):
+            _require_approved_access(
+                ledger["secondaryDatasetId"],
+                ledger["secondaryRequestId"],
+            )
 
         restore_dicom_ciphertext_bundle(
             job_id,

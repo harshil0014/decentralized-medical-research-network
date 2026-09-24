@@ -42,7 +42,16 @@ SENSITIVE_KEYWORDS = [
     "AcquisitionTime",
     "ContentDate",
     "ContentTime",
+    "StudyDescription",
+    "SeriesDescription",
+    "ProtocolName",
+    "RequestedProcedureDescription",
+    "ScheduledProcedureStepDescription",
+    "PerformedProcedureStepDescription",
+    "AdmittingDiagnosesDescription",
+    "DerivationDescription",
     "ImageComments",
+    "PatientState",
 ]
 
 
@@ -67,12 +76,20 @@ def _remove_overlay_data(ds: pydicom.Dataset) -> None:
 def deidentify_dataset(ds: pydicom.Dataset, uid_map: dict[str, str] | None = None) -> None:
     _reject_visual_identity_risk(ds)
 
-    for keyword in SENSITIVE_KEYWORDS:
-        if keyword in ds:
-            del ds[keyword]
+    def scrub_dataset(dataset: pydicom.Dataset) -> None:
+        for keyword in SENSITIVE_KEYWORDS:
+            if keyword in dataset:
+                del dataset[keyword]
 
-    ds.remove_private_tags()
-    _remove_overlay_data(ds)
+        dataset.remove_private_tags()
+        _remove_overlay_data(dataset)
+
+        for element in list(dataset):
+            if element.VR == "SQ":
+                for item in element.value:
+                    scrub_dataset(item)
+
+    scrub_dataset(ds)
 
     if uid_map is None:
         uid_map = {}
@@ -107,9 +124,22 @@ def deidentify_dataset(ds: pydicom.Dataset, uid_map: dict[str, str] | None = Non
     if "SOPInstanceUID" in ds and "MediaStorageSOPInstanceUID" in ds.file_meta:
         ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
 
+    for keyword in (
+        "SourceApplicationEntityTitle",
+        "SendingApplicationEntityTitle",
+        "ReceivingApplicationEntityTitle",
+        "PrivateInformationCreatorUID",
+        "PrivateInformation",
+    ):
+        if keyword in ds.file_meta:
+            del ds.file_meta[keyword]
+
+    ds.preamble = b"\x00" * 128
+
     ds.PatientIdentityRemoved = "YES"
     ds.DeidentificationMethod = (
-        "PHI removed; private tags/overlays removed; UIDs remapped"
+        "Prototype sanitization: direct identifiers/free-text/private tags/"
+        "overlays removed and identity UIDs remapped; not a full DICOM PS3.15 profile"
     )
 
 
@@ -125,8 +155,6 @@ def deidentify_dicom_in_place(path: str | Path) -> dict:
 
     return {
         "modality": getattr(ds, "Modality", None),
-        "study_description": getattr(ds, "StudyDescription", None),
-        "series_description": getattr(ds, "SeriesDescription", None),
         "rows": getattr(ds, "Rows", None),
         "columns": getattr(ds, "Columns", None),
         "number_of_frames": getattr(ds, "NumberOfFrames", None),

@@ -65,6 +65,8 @@ upload = client.post(
 )
 assert upload.status_code == 200, upload.text
 assert upload.json()["storageState"] == "PRIVATE_READY"
+assert upload.json()["metadataSummary"].startswith("sha256:")
+assert "Synthetic glucose cohort" not in upload.json()["metadataSummary"]
 
 preview = client.get(
     f"/datasets/{dataset_id}/preview",
@@ -84,6 +86,8 @@ create = client.post(
 )
 assert create.status_code == 200, create.text
 assert create.json()["status"] == "PENDING"
+assert create.json()["purpose"].startswith("sha256:")
+assert "Synthetic glucose analysis" not in create.json()["purpose"]
 
 approve = client.post(
     f"/requests/{request_id}/approve",
@@ -176,11 +180,35 @@ assert sum_decrypt.status_code == 200, sum_decrypt.text
 sum_value = float(sum_decrypt.json()["sum"])
 assert abs(sum_value - 460.0) < 0.01
 
+revocation_job_create = client.post(
+    "/he/glucose/encrypt",
+    headers=hospital,
+    json={
+        "dataset_id": dataset_id,
+        "request_id": request_id,
+        "metric": "glucose_mg_dl",
+    },
+)
+assert revocation_job_create.status_code == 200, revocation_job_create.text
+revocation_job = revocation_job_create.json()["job_id"]
+
+revocation_job_compute = client.post(
+    f"/he/glucose/{revocation_job}/compute-average",
+    headers=researcher,
+)
+assert revocation_job_compute.status_code == 200, revocation_job_compute.text
+
 revoke_request = client.post(
     f"/requests/{request_id}/revoke",
     headers=hospital,
 )
 assert revoke_request.status_code == 200, revoke_request.text
+
+denied_decrypt = client.post(
+    f"/he/glucose/{revocation_job}/decrypt-average",
+    headers=hospital,
+)
+assert denied_decrypt.status_code == 403, denied_decrypt.text
 
 denied = client.get(
     f"/requests/{request_id}/download",

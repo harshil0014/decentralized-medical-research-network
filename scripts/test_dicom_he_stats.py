@@ -120,7 +120,12 @@ def make_dicom_seg_fixture() -> tuple[bytes, bytes, np.ndarray, str]:
     source.PatientSex = "O"
     source.StudyDate = "20260101"
     source.StudyTime = "120000"
+    source.StudyDescription = "Patient Alice research scan"
+    source.SeriesDescription = "Alice T1"
+    source.ProtocolName = "Protocol Alice"
     source.AccessionNumber = "SEGTEST"
+    source.file_meta.SourceApplicationEntityTitle = "ALICE_AE"
+    source.preamble = b"X" * 128
     source.StudyID = "1"
     source.SeriesNumber = 1
     source.FrameOfReferenceUID = frame_uid
@@ -162,6 +167,11 @@ def make_dicom_seg_fixture() -> tuple[bytes, bytes, np.ndarray, str]:
     seg_clean = segmentation.copy()
     deidentify_dataset(source_clean, uid_map={})
     deidentify_dataset(seg_clean, uid_map={})
+
+    for keyword in ("StudyDescription", "SeriesDescription", "ProtocolName"):
+        assert keyword not in source_clean
+    assert "SourceApplicationEntityTitle" not in source_clean.file_meta
+    assert source_clean.preamble == b"\x00" * 128
 
     source_stream = io.BytesIO()
     source_clean.save_as(source_stream, enforce_file_format=True)

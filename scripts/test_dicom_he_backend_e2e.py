@@ -130,6 +130,7 @@ suffix = str(int(time.time() * 1000))
 dataset_id = f"DICOM-HE-E2E-{suffix}"
 seg_dataset_id = f"DICOM-SEG-E2E-{suffix}"
 request_id = f"DICOM-HE-REQ-{suffix}"
+seg_request_id = f"DICOM-SEG-REQ-{suffix}"
 dicom_bytes = make_ct()
 seg_bytes = make_seg(dicom_bytes)
 
@@ -190,6 +191,41 @@ approve = client.post(
 )
 assert approve.status_code == 200, approve.text
 assert approve.json()["status"] == "APPROVED"
+
+seg_request = client.post(
+    "/requests",
+    headers=researcher,
+    json={
+        "request_id": seg_request_id,
+        "dataset_id": seg_dataset_id,
+        "purpose": "Use segmentation mask for encrypted CT analysis",
+    },
+)
+assert seg_request.status_code == 200, seg_request.text
+assert seg_request.json()["status"] == "PENDING"
+
+seg_denied = client.post(
+    "/he/dicom/encrypt",
+    headers=hospital,
+    json={
+        "dataset_id": dataset_id,
+        "request_id": request_id,
+        "analysis": "MEAN",
+        "he_mode": "RAW_VOXELS",
+        "scope": "DICOM_SEG",
+        "segmentation_dataset_id": seg_dataset_id,
+        "segmentation_request_id": seg_request_id,
+        "segment_number": 1,
+    },
+)
+assert seg_denied.status_code == 403, seg_denied.text
+
+seg_approve = client.post(
+    f"/requests/{seg_request_id}/approve",
+    headers=hospital,
+)
+assert seg_approve.status_code == 200, seg_approve.text
+assert seg_approve.json()["status"] == "APPROVED"
 
 capabilities = client.get("/he/dicom/capabilities", headers=researcher)
 assert capabilities.status_code == 200, capabilities.text
@@ -333,6 +369,7 @@ seg_created = client.post(
         "he_mode": "RAW_VOXELS",
         "scope": "DICOM_SEG",
         "segmentation_dataset_id": seg_dataset_id,
+        "segmentation_request_id": seg_request_id,
         "segment_number": 1,
     },
 )
@@ -343,6 +380,7 @@ assert seg_body["segment_number"] == 1
 assert seg_body["segment_label"] == "Test ROI"
 assert seg_body["segment_voxel_count"] == 4
 assert seg_body["segmentation_dataset_id"] == seg_dataset_id
+assert seg_body["segmentation_request_id"] == seg_request_id
 assert seg_body["segmentation_dataset_sha256_verified"] is True
 assert seg_body["researcher_has_encrypted_raw_voxels"] is True
 seg_job = seg_body["job_id"]
@@ -366,6 +404,8 @@ seg_ledger = client.get(
     headers=researcher,
 )
 assert seg_ledger.status_code == 200, seg_ledger.text
+assert seg_ledger.json()["secondaryDatasetId"] == seg_dataset_id
+assert seg_ledger.json()["secondaryRequestId"] == seg_request_id
 assert ":DICOM_SEG:RAW_VOXELS:SEG1" in seg_ledger.json()["metric"]
 print(f"DICOM SEG RAW-VOXEL E2E: PASS ({seg_value:.6f})")
 
