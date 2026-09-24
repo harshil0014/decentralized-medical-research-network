@@ -334,9 +334,15 @@ def restore_recovery_bundle(
                 "set replace_existing=true only for an intentional restore"
             )
 
+    managed_existing = {
+        path
+        for path in key_root.iterdir()
+        if path.is_file() and _KEY_FILE.fullmatch(path.name)
+    }
+
     original_files: dict[Path, bytes | None] = {
         path: path.read_bytes() if path.exists() else None
-        for path in targets
+        for path in (managed_existing | set(targets))
     }
     original_locator = (
         locator_path.read_bytes()
@@ -347,6 +353,10 @@ def restore_recovery_bundle(
     try:
         for path, raw in targets.items():
             _atomic_write(path, raw)
+
+        if replace_existing:
+            for stale in sorted(managed_existing - set(targets)):
+                stale.unlink()
 
         _atomic_write(
             locator_path,
@@ -370,6 +380,18 @@ def restore_recovery_bundle(
             verified += 1
 
     except Exception:
+        current_managed = {
+            path
+            for path in key_root.iterdir()
+            if path.is_file() and _KEY_FILE.fullmatch(path.name)
+        }
+
+        for path in current_managed - set(original_files):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
         for path, original in original_files.items():
             if original is None:
                 try:
