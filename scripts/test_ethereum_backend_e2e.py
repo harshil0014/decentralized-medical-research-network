@@ -35,9 +35,12 @@ hospital = {"Authorization": f"Bearer {hospital_token}"}
 researcher = {"Authorization": f"Bearer {researcher_token}"}
 
 suffix = str(int(time.time() * 1000))
-dataset_id = f"API-E2E-{suffix}"
-request_id = f"API-REQ-{suffix}"
-request_id_2 = f"API-REQ2-{suffix}"
+dataset_label = f"API-E2E-{suffix}"
+request_label = f"API-REQ-{suffix}"
+request_label_2 = f"API-REQ2-{suffix}"
+dataset_id = dataset_label
+request_id = request_label
+request_id_2 = request_label_2
 
 csv_bytes = (
     b"patient_code,glucose_mg_dl\n"
@@ -65,6 +68,9 @@ upload = client.post(
 )
 assert upload.status_code == 200, upload.text
 assert upload.json()["storageState"] == "PRIVATE_READY"
+dataset_id = upload.json()["datasetId"]
+assert dataset_id.startswith("ds-") and len(dataset_id) == 35
+assert dataset_label not in dataset_id
 assert upload.json()["metadataSummary"].startswith("sha256:")
 assert "Synthetic glucose cohort" not in upload.json()["metadataSummary"]
 
@@ -85,6 +91,9 @@ create = client.post(
     },
 )
 assert create.status_code == 200, create.text
+request_id = create.json()["requestId"]
+assert request_id.startswith("req-") and len(request_id) == 36
+assert request_label not in request_id
 assert create.json()["status"] == "PENDING"
 assert create.json()["purpose"].startswith("sha256:")
 assert "Synthetic glucose analysis" not in create.json()["purpose"]
@@ -236,6 +245,8 @@ create2 = client.post(
     },
 )
 assert create2.status_code == 200, create2.text
+request_id_2 = create2.json()["requestId"]
+assert request_id_2.startswith("req-") and len(request_id_2) == 36
 approve2 = client.post(
     f"/requests/{request_id_2}/approve",
     headers=hospital,
