@@ -9,15 +9,16 @@ const bytecode = fs.readFileSync(path.join(root, "build", "MedicalResearchRegist
 const rpcUrl = process.env.ETH_RPC_URL || "http://127.0.0.1:8545";
 
 const provider = new ethers.JsonRpcProvider(rpcUrl);
-const hospital = await provider.getSigner(0);
-const researcherSigners = [];
-for (let index = 1; index <= 9; index += 1) {
-  researcherSigners.push(await provider.getSigner(index));
+
+let hospital;
+const hospitalKeyFile = (process.env.MEDICAL_HOSPITAL_PRIVATE_KEY_FILE || "").trim();
+if (hospitalKeyFile) {
+  const privateKey = fs.readFileSync(hospitalKeyFile, "utf8").trim();
+  hospital = new ethers.Wallet(privateKey, provider);
+} else {
+  hospital = await provider.getSigner(0);
 }
-const researcherAddresses = await Promise.all(
-  researcherSigners.map((signer) => signer.getAddress())
-);
-const researcher = researcherSigners[0];
+
 const factory = new ethers.ContractFactory(abi, bytecode, hospital);
 const contract = await factory.deploy();
 await contract.waitForDeployment();
@@ -28,11 +29,11 @@ const receipt = await deploymentTx.wait();
 
 const deployment = {
   rpcUrl,
+  network: process.env.MEDICAL_ETHEREUM_NETWORK || "Ganache",
   chainId: Number(network.chainId),
   contractAddress: await contract.getAddress(),
   hospitalAddress: await hospital.getAddress(),
-  researcherAddress: await researcher.getAddress(),
-  researcherAddresses,
+  researcherSigning: "external-eip191",
   deployedBlock: receipt.blockNumber,
   abiPath: "ethereum/build/MedicalResearchRegistry.abi.json"
 };
