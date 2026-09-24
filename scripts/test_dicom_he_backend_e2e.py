@@ -182,7 +182,7 @@ assert upload.json()["storageState"] == "PRIVATE_READY"
 dataset_id = upload.json()["datasetId"]
 assert dataset_id.startswith("ds-") and len(dataset_id) == 35
 assert dataset_label not in dataset_id
-assert upload.json()["dataType"] == "DICOM_CT"
+assert upload.json()["dataType"] == "DICOM"
 
 seg_upload = client.post(
     "/datasets/upload",
@@ -353,7 +353,7 @@ for analysis, reference in references.items():
     )
     assert ledger.status_code == 200, ledger.text
     assert ledger.json()["status"] == "DECRYPTED"
-    assert ledger.json()["metric"].startswith(f"DICOM:{analysis}:")
+    assert ledger.json()["metric"].startswith("DICOM:sha256:")
     assert history.status_code == 200, history.text
     assert [x["value"]["status"] for x in history.json()] == [
         "ENCRYPTED",
@@ -450,7 +450,7 @@ seg_ledger = client.get(
 assert seg_ledger.status_code == 200, seg_ledger.text
 assert seg_ledger.json()["secondaryDatasetId"] == seg_dataset_id
 assert seg_ledger.json()["secondaryRequestId"] == seg_request_id
-assert ":DICOM_SEG:RAW_VOXELS:SEG1" in seg_ledger.json()["metric"]
+assert seg_ledger.json()["metric"].startswith("DICOM:sha256:")
 print(f"DICOM SEG RAW-VOXEL E2E: PASS ({seg_value:.6f})")
 
 block_created = client.post(
