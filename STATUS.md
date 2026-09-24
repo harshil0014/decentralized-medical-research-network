@@ -5,8 +5,8 @@
 - Ethereum-compatible local ledger: Ganache
 - Solidity governance and audit contract
 - Hospital = local account 0
-- Researcher = local account 1
-- FastAPI service-token roles
+- per-researcher service identities map to distinct local accounts 1-9
+- FastAPI Hospital token plus a validated multi-researcher token/wallet registry
 - AES-256-GCM encrypted datasets in IPFS
 - Hospital-local CID/SHA locator metadata with Ethereum commitment
 - Microsoft SEAL 4.4 CKKS Average/SUM and DICOM statistics
@@ -20,15 +20,18 @@
 - DICOM sanitization applies the PS3.15 2024b header rule table plus stricter free-text/private-tag/overlay cleanup and UID remapping.
 - CT/MR upload fails closed unless BurnedInAnnotation=NO, RecognizableVisualFeatures=NO, and the Hospital supplies an explicit pixel-review attestation.
 - Researcher plaintext dataset download is disabled by default; the normal access path is HE/compute-to-data.
+- Medical multipart and application plaintext staging is restricted to verified RAM-backed tmpfs/ramfs.
 - Dataset AES keys are stored as AES-256-GCM-wrapped `MEDKEY01` blobs; the wrapping key must be injected externally and is never persisted by the app.
+- Successful upload/key rotation automatically refreshes an authenticated, chain-bound recovery bundle containing wrapped keys and private locators.
+- Each researcher token maps to its own Ethereum wallet; cross-researcher grant/download/HE use is rejected.
 - DICOM SEG analysis requires independent authorization for both the source image dataset and SEG dataset.
 - HE compute and Hospital decryption re-check all required active grants and dataset consent.
 
 ## Important boundaries
 
 This remains a research prototype:
-- one privileged Hospital wallet and one mapped Researcher wallet
-- service tokens instead of per-person OIDC/wallet identities
+- one privileged Hospital wallet
+- per-researcher service-token/wallet identities are implemented, but institutional OIDC/SSO and lifecycle provisioning are not
 - local Ganache rather than a public/consortium production network
 - dataset key blobs are master-key wrapped locally, but production KMS/HSM integration is still a future hardening step
 - header de-identification follows the PS3.15 2024b rule table, but full clinical de-identification/compliance still requires appropriate pixel review and governance
