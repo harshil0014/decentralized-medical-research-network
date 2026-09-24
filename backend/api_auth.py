@@ -8,6 +8,8 @@ import os
 import re
 import stat
 
+from web3 import Web3
+
 from fastapi import Depends, Header, HTTPException
 
 
@@ -46,13 +48,13 @@ def _assert_private_path(path: Path, *, directory: bool = False) -> None:
 class AuthIdentity:
     role: str
     researcher_id: str | None = None
-    wallet_index: int | None = None
+    wallet_address: str | None = None
 
 
 @dataclass(frozen=True)
 class _ResearcherCredential:
     researcher_id: str
-    wallet_index: int
+    wallet_address: str
     token: str
 
 
@@ -107,8 +109,10 @@ def _load_researchers() -> tuple[_ResearcherCredential, ...]:
     except json.JSONDecodeError as exc:
         raise RuntimeError("Researcher registry is invalid JSON") from exc
 
-    if payload.get("schemaVersion") != 1:
-        raise RuntimeError("Unsupported researcher registry schema")
+    if payload.get("schemaVersion") != 2:
+        raise RuntimeError(
+            "Researcher registry schemaVersion must be 2 with externally owned walletAddress values"
+        )
 
     rows = payload.get("researchers")
     if not isinstance(rows, list) or not rows:
@@ -116,7 +120,7 @@ def _load_researchers() -> tuple[_ResearcherCredential, ...]:
 
     credentials: list[_ResearcherCredential] = []
     seen_ids: set[str] = set()
-    seen_wallets: set[int] = set()
+    seen_wallets: set[str] = set()
     seen_tokens: set[str] = set()
 
     for row in rows:
@@ -124,32 +128,33 @@ def _load_researchers() -> tuple[_ResearcherCredential, ...]:
             raise RuntimeError("Researcher registry entry must be an object")
 
         researcher_id = str(row.get("id") or "").strip()
-        wallet_index = row.get("walletIndex")
+        wallet_address = str(row.get("walletAddress") or "").strip()
         token_file = str(row.get("tokenFile") or "").strip()
 
         if not _RESEARCHER_ID.fullmatch(researcher_id):
             raise RuntimeError("Researcher id is invalid")
 
-        if not isinstance(wallet_index, int) or not 1 <= wallet_index <= 9:
-            raise RuntimeError("Researcher walletIndex must be an integer from 1 to 9")
+        if not Web3.is_address(wallet_address):
+            raise RuntimeError("Researcher walletAddress must be a valid Ethereum address")
+        wallet_address = Web3.to_checksum_address(wallet_address)
 
         token = _load_token(_resolve_token_file(token_file))
 
         if researcher_id in seen_ids:
             raise RuntimeError("Duplicate researcher id")
-        if wallet_index in seen_wallets:
-            raise RuntimeError("Duplicate researcher walletIndex")
+        if wallet_address.lower() in seen_wallets:
+            raise RuntimeError("Duplicate researcher walletAddress")
         if token in seen_tokens:
             raise RuntimeError("Researcher tokens must be unique")
 
         seen_ids.add(researcher_id)
-        seen_wallets.add(wallet_index)
+        seen_wallets.add(wallet_address.lower())
         seen_tokens.add(token)
 
         credentials.append(
             _ResearcherCredential(
                 researcher_id=researcher_id,
-                wallet_index=wallet_index,
+                wallet_address=wallet_address,
                 token=token,
             )
         )
@@ -209,7 +214,7 @@ def authenticated_identity(
         return AuthIdentity(
             role="researcher",
             researcher_id=matched_researcher.researcher_id,
-            wallet_index=matched_researcher.wallet_index,
+            wallet_address=matched_researcher.wallet_address,
         )
 
     raise HTTPException(
@@ -246,7 +251,7 @@ def require_hospital(
 def require_researcher(
     identity: AuthIdentity = Depends(authenticated_identity),
 ) -> AuthIdentity:
-    if identity.role != "researcher" or identity.wallet_index is None:
+    if identity.role != "researcher" or identity.wallet_address is None:
         raise HTTPException(
             status_code=403,
             detail="Researcher role required",
@@ -256,7 +261,7 @@ def require_researcher(
 
 
 def researcher_org(identity: AuthIdentity) -> str:
-    if identity.role != "researcher" or identity.wallet_index is None:
+    if identity.role != "researcher" or identity.wallet_address is None:
         raise ValueError("Researcher identity required")
 
-    return f"researcher:{identity.wallet_index}"
+    return f"researcher-address:{identity.wallet_address}"
