@@ -12,6 +12,7 @@ test -s "$TLS/server.key"
 test -s "$TLS/server.crt"
 
 : "${MEDICAL_MASTER_KEY_HEX:?MEDICAL_MASTER_KEY_HEX must be supplied by an external secret source}"
+: "${MEDICAL_RECOVERY_BACKUP_PATH:?MEDICAL_RECOVERY_BACKUP_PATH must point to a separate backup destination}"
 backend/.venv/bin/python - <<'PY'
 import os
 value = os.environ.get("MEDICAL_MASTER_KEY_HEX", "")
@@ -34,6 +35,11 @@ export TEMP="$PLAINTEXT_TMP"
 backend/.venv/bin/python - <<'PY'
 from backend.secure_temp import secure_plaintext_temp_root
 print("RAM plaintext staging:", secure_plaintext_temp_root())
+PY
+
+backend/.venv/bin/python - <<'PY'
+from backend.recovery import recovery_backup_path
+print("Recovery destination:", recovery_backup_path())
 PY
 
 backend/.venv/bin/python - <<'PY'
