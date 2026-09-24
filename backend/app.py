@@ -20,6 +20,10 @@ from backend.api_auth import (
 )
 
 from backend.frontend_ui import router as frontend_router
+from backend.data_backup import (
+    backup_encrypted_dataset,
+    delete_dataset_backup,
+)
 from backend.runtime_security import (
     SecurityHeadersMiddleware,
     require_mutation_lock,
@@ -440,6 +444,19 @@ def upload_dataset(
 
         cid = added.stdout.strip()
 
+        try:
+            backup_encrypted_dataset(
+                dataset_id,
+                Path(encrypted_path),
+                cid,
+                digest,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Encrypted-object backup failed before ledger registration",
+            ) from exc
+
         # ====================================================
         # STAGE 1
         # Public dataset metadata only.
@@ -789,6 +806,11 @@ def upload_dataset(
                 delete_dataset_key(
                     dataset_id
                 )
+
+            try:
+                delete_dataset_backup(dataset_id)
+            except Exception:
+                pass
 
         if temp_path:
             try:
