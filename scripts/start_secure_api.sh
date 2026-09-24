@@ -23,6 +23,19 @@ except ValueError as exc:
     raise SystemExit("MEDICAL_MASTER_KEY_HEX must be hexadecimal") from exc
 PY
 
+PLAINTEXT_TMP="${MEDICAL_PLAINTEXT_TMPDIR:-/dev/shm/medical-registry-plaintext}"
+mkdir -p "$PLAINTEXT_TMP"
+chmod 700 "$PLAINTEXT_TMP"
+export MEDICAL_PLAINTEXT_TMPDIR="$PLAINTEXT_TMP"
+export TMPDIR="$PLAINTEXT_TMP"
+export TMP="$PLAINTEXT_TMP"
+export TEMP="$PLAINTEXT_TMP"
+
+backend/.venv/bin/python - <<'PY'
+from backend.secure_temp import secure_plaintext_temp_root
+print("RAM plaintext staging:", secure_plaintext_temp_root())
+PY
+
 test -s "ethereum/deployment.json"
 backend/.venv/bin/python - <<'PY'
 from backend.ethereum_ledger import health
