@@ -7,7 +7,7 @@ AUTH=/root/.medical-registry
 TLS="$AUTH/tls"
 
 test -s "$AUTH/hospital_api.token"
-test -s "$AUTH/researcher_api.token"
+test -s "$AUTH/researchers.json"
 test -s "$TLS/server.key"
 test -s "$TLS/server.crt"
 
@@ -34,6 +34,13 @@ export TEMP="$PLAINTEXT_TMP"
 backend/.venv/bin/python - <<'PY'
 from backend.secure_temp import secure_plaintext_temp_root
 print("RAM plaintext staging:", secure_plaintext_temp_root())
+PY
+
+backend/.venv/bin/python - <<'PY'
+import backend.api_auth as auth
+if not getattr(auth, "_RESEARCHERS", ()):
+    raise SystemExit("At least one researcher identity is required")
+print("Researcher identities:", len(auth._RESEARCHERS))
 PY
 
 test -s "ethereum/deployment.json"
