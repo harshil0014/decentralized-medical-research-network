@@ -71,15 +71,10 @@ def secure_plaintext_temp_root() -> Path:
             raise RuntimeError(
                 f"Plaintext staging path must be tmpfs/ramfs, got {fs_type or 'unknown'}: {root}"
             )
-    elif os.environ.get("MEDICAL_ALLOW_NONLINUX_RAM_STAGING", "").lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
+    else:
         raise RuntimeError(
-            "Plaintext staging is fail-closed on non-Linux platforms. "
-            "Run the secure API in WSL/Linux or explicitly provide an audited RAM-backed implementation."
+            "Plaintext staging is supported only on Linux/WSL where tmpfs/ramfs "
+            "can be verified. Run the secure API inside WSL/Linux."
         )
 
     return root
