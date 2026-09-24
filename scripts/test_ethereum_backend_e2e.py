@@ -15,6 +15,9 @@ import uuid
 import tempfile
 import time
 
+from eth_account import Account
+from eth_account.messages import encode_defunct
+
 runtime = Path(tempfile.mkdtemp(prefix="medical-api-e2e-"))
 auth = runtime / "auth"
 auth.mkdir(parents=True)
@@ -22,16 +25,26 @@ auth.chmod(0o700)
 hospital_token = "1" * 64
 researcher_token = "2" * 64
 researcher2_token = "5" * 64
+researcher_wallet = Account.create()
+researcher2_wallet = Account.create()
 (auth / "hospital_api.token").write_text(hospital_token)
 (auth / "researcher_a.token").write_text(researcher_token)
 (auth / "researcher_b.token").write_text(researcher2_token)
 (auth / "researchers.json").write_text(
     json.dumps(
         {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "researchers": [
-                {"id": "researcher-a", "tokenFile": "researcher_a.token", "walletIndex": 1},
-                {"id": "researcher-b", "tokenFile": "researcher_b.token", "walletIndex": 2},
+                {
+                    "id": "researcher-a",
+                    "tokenFile": "researcher_a.token",
+                    "walletAddress": researcher_wallet.address,
+                },
+                {
+                    "id": "researcher-b",
+                    "tokenFile": "researcher_b.token",
+                    "walletAddress": researcher2_wallet.address,
+                },
             ],
         }
     )
@@ -50,6 +63,9 @@ os.environ["MEDICAL_MASTER_KEY_HEX"] = os.urandom(32).hex()
 os.environ["MEDICAL_PLAINTEXT_TMPDIR"] = str(plaintext_ram)
 os.environ["MEDICAL_RECOVERY_BACKUP_PATH"] = str(
     runtime / "external-backup" / "medical-recovery.medrec"
+)
+os.environ["MEDICAL_DATA_BACKUP_DIR"] = str(
+    runtime / "external-data-backup"
 )
 os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"] = str(
     runtime / "private-locators.json"
@@ -80,6 +96,46 @@ client = TestClient(app)
 hospital = {"Authorization": f"Bearer {hospital_token}"}
 researcher = {"Authorization": f"Bearer {researcher_token}"}
 researcher2 = {"Authorization": f"Bearer {researcher2_token}"}
+
+
+def sign_digest(wallet, digest: str) -> str:
+    return Account.sign_message(
+        encode_defunct(hexstr=digest),
+        wallet.key,
+    ).signature.hex()
+
+
+def create_signed_request(headers, wallet, dataset_id: str, purpose: str):
+    prepared = client.post(
+        "/requests/prepare",
+        headers=headers,
+        json={"dataset_id": dataset_id, "purpose": purpose},
+    )
+    assert prepared.status_code == 200, prepared.text
+    body = prepared.json()
+    signature = sign_digest(wallet, body["signingDigest"])
+    return client.post(
+        "/requests",
+        headers=headers,
+        json={
+            "request_id": body["requestId"],
+            "dataset_id": dataset_id,
+            "purpose": purpose,
+            "signature": signature,
+        },
+    )
+
+
+def signed_compute(headers, wallet, digest_url: str, compute_url: str):
+    prepared = client.get(digest_url, headers=headers)
+    assert prepared.status_code == 200, prepared.text
+    signature = sign_digest(wallet, prepared.json()["signingDigest"])
+    return client.post(
+        compute_url,
+        headers=headers,
+        json={"signature": signature},
+    )
+
 
 suffix = str(int(time.time() * 1000))
 dataset_label = f"API-E2E-{suffix}"
@@ -142,14 +198,11 @@ preview = client.get(
 assert preview.status_code == 200, preview.text
 assert "glucose_mg_dl" in preview.json()["columns"]
 
-create = client.post(
-    "/requests",
-    headers=researcher,
-    json={
-        "request_id": request_id,
-        "dataset_id": dataset_id,
-        "purpose": "Synthetic glucose analysis",
-    },
+create = create_signed_request(
+    researcher,
+    researcher_wallet,
+    dataset_id,
+    "Synthetic glucose analysis",
 )
 assert create.status_code == 200, create.text
 request_id = create.json()["requestId"]
@@ -160,13 +213,11 @@ assert create.json()["purpose"].startswith("sha256:")
 assert "Synthetic glucose analysis" not in create.json()["purpose"]
 assert create.json()["requesterAddress"].lower() == me1.json()["ethereumAddress"].lower()
 
-researcher2_request = client.post(
-    "/requests",
-    headers=researcher2,
-    json={
-        "dataset_id": dataset_id,
-        "purpose": "Independent second researcher request",
-    },
+researcher2_request = create_signed_request(
+    researcher2,
+    researcher2_wallet,
+    dataset_id,
+    "Independent second researcher request",
 )
 assert researcher2_request.status_code == 200, researcher2_request.text
 assert researcher2_request.json()["researcherId"] == "researcher-b"
@@ -298,12 +349,15 @@ assert he_create.json()["ethereum_status"] == "ENCRYPTED"
 wrong_compute = client.post(
     f"/he/glucose/{average_job}/compute-average",
     headers=researcher2,
+    json={"signature": "0x" + "00" * 65},
 )
 assert wrong_compute.status_code == 403, wrong_compute.text
 
-he_compute = client.post(
+he_compute = signed_compute(
+    researcher,
+    researcher_wallet,
+    f"/he/glucose/{average_job}/signing-digest",
     f"/he/glucose/{average_job}/compute-average",
-    headers=researcher,
 )
 assert he_compute.status_code == 200, he_compute.text
 assert he_compute.json()["ethereum_status"] == "COMPUTED"
@@ -341,9 +395,11 @@ sum_create = client.post(
 assert sum_create.status_code == 200, sum_create.text
 sum_job = sum_create.json()["job_id"]
 
-sum_compute = client.post(
+sum_compute = signed_compute(
+    researcher,
+    researcher_wallet,
+    f"/he/sum/{sum_job}/signing-digest",
     f"/he/sum/{sum_job}/compute",
-    headers=researcher,
 )
 assert sum_compute.status_code == 200, sum_compute.text
 assert sum_compute.json()["ethereum_status"] == "COMPUTED"
@@ -368,9 +424,11 @@ revocation_job_create = client.post(
 assert revocation_job_create.status_code == 200, revocation_job_create.text
 revocation_job = revocation_job_create.json()["job_id"]
 
-revocation_job_compute = client.post(
+revocation_job_compute = signed_compute(
+    researcher,
+    researcher_wallet,
+    f"/he/glucose/{revocation_job}/signing-digest",
     f"/he/glucose/{revocation_job}/compute-average",
-    headers=researcher,
 )
 assert revocation_job_compute.status_code == 200, revocation_job_compute.text
 
@@ -392,14 +450,11 @@ denied = client.get(
 )
 assert denied.status_code == 403
 
-create2 = client.post(
-    "/requests",
-    headers=researcher,
-    json={
-        "request_id": request_id_2,
-        "dataset_id": dataset_id,
-        "purpose": "Second synthetic analysis",
-    },
+create2 = create_signed_request(
+    researcher,
+    researcher_wallet,
+    dataset_id,
+    "Second synthetic analysis",
 )
 assert create2.status_code == 200, create2.text
 request_id_2 = create2.json()["requestId"]
