@@ -11,6 +11,8 @@ import subprocess
 import uuid
 from pathlib import Path, PurePosixPath
 
+from backend.secure_temp import secure_plaintext_temp_root
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SEAL_DEMO = PROJECT_ROOT / "seal_demo"
@@ -20,8 +22,12 @@ HOSPITAL_ENCRYPT = BUILD_DIR / "hospital_encrypt"
 RESEARCHER_COMPUTE = BUILD_DIR / "researcher_compute"
 HOSPITAL_DECRYPT = BUILD_DIR / "hospital_decrypt"
 
-RUNTIME_ROOT = Path("/tmp/medical-he-jobs")
-RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+RUNTIME_ROOT = secure_plaintext_temp_root() / "medical-he-jobs"
+RUNTIME_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+try:
+    RUNTIME_ROOT.chmod(0o700)
+except OSError:
+    pass
 
 JOB_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
