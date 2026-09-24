@@ -9,6 +9,8 @@ from fastapi import (
 from pydantic import BaseModel
 
 from backend.api_auth import (
+    AuthIdentity,
+    researcher_org,
     require_authenticated,
     require_hospital,
     require_researcher,
@@ -88,12 +90,17 @@ def _ledger_query(
 def _require_approved_access(
     dataset_id: str,
     request_id: str,
+    *,
+    actor_org: str | None = None,
+    actor_address: str | None = None,
 ) -> dict:
+
+    query_org = actor_org or "org2"
 
     request = _ledger_query(
         "ReadAccessRequest",
         [request_id],
-        "org2",
+        query_org,
     )
 
     if request.get("datasetId") != dataset_id:
@@ -105,6 +112,14 @@ def _require_approved_access(
             ),
         )
 
+    if actor_address is not None and str(
+        request.get("requesterAddress") or ""
+    ).lower() != actor_address.lower():
+        raise HTTPException(
+            status_code=403,
+            detail="Access request belongs to a different researcher identity",
+        )
+
     if request.get("status") != "APPROVED":
         raise HTTPException(
             status_code=403,
@@ -114,7 +129,7 @@ def _require_approved_access(
     allowed = _ledger_query(
         "CanAccess",
         [request_id],
-        "org2",
+        query_org,
     )
 
     if allowed is not True:
@@ -337,20 +352,24 @@ def encrypt_glucose_cohort(
 @router.post(
     "/{job_id}/compute-average",
     dependencies=[
-        Depends(require_researcher),
         Depends(require_mutation_lock),
     ],
 )
 def compute_average(
     job_id: str,
+    identity: AuthIdentity = Depends(require_researcher),
 ):
     result_cid = None
 
     try:
+        actor_org = researcher_org(identity)
+        from backend.ethereum_ledger import account_address
+        actor_address = account_address(actor_org)
+
         ledger = _ledger_query(
             "ReadHEJob",
             [job_id],
-            "org2",
+            actor_org,
         )
 
         if ledger.get("status") != "ENCRYPTED":
@@ -362,6 +381,8 @@ def compute_average(
         _require_approved_access(
             ledger["datasetId"],
             ledger["requestId"],
+            actor_org=actor_org,
+            actor_address=actor_address,
         )
 
         ciphertext_cid = ledger.get(
@@ -417,7 +438,7 @@ def compute_average(
                     result_cid,
                     result["result_sha256"],
                 ],
-                "org2",
+                actor_org,
             )
 
         except Exception:
@@ -436,7 +457,7 @@ def compute_average(
         ledger = _ledger_query(
             "ReadHEJob",
             [job_id],
-            "org2",
+            actor_org,
         )
 
         if ledger.get("resultCid") != result_cid:
