@@ -161,6 +161,7 @@ def upload_dataset(
     data_type: str | None = Form(None),
     metadata_summary: str | None = Form(None),
     consent_state: str = Form("ACTIVE"),
+    visual_phi_reviewed: bool = Form(False),
     file: UploadFile = File(...),
 ):
     temp_path = None
@@ -227,7 +228,10 @@ def upload_dataset(
                 from backend.dicom_series import deidentify_dicom_series_zip
                 from backend.dicom_utils import sha256_file
 
-                safe_metadata = deidentify_dicom_series_zip(temp_path)
+                safe_metadata = deidentify_dicom_series_zip(
+                    temp_path,
+                    visual_phi_reviewed=visual_phi_reviewed,
+                )
             except Exception as exc:
                 raise HTTPException(
                     status_code=400,
@@ -261,7 +265,10 @@ def upload_dataset(
             from backend.dicom_utils import deidentify_dicom_in_place, sha256_file
 
             try:
-                safe_metadata = deidentify_dicom_in_place(temp_path)
+                safe_metadata = deidentify_dicom_in_place(
+                    temp_path,
+                    visual_phi_reviewed=visual_phi_reviewed,
+                )
             except Exception as exc:
                 raise HTTPException(
                     status_code=400,
