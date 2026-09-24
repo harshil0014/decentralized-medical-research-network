@@ -52,6 +52,7 @@ def _deployment() -> dict[str, Any]:
         "contractAddress",
         "hospitalAddress",
         "researcherAddress",
+        "researcherAddresses",
         "abiPath",
     }
     missing = sorted(required - data.keys())
@@ -87,20 +88,53 @@ def _contract():
 
 def _account(org: str) -> str:
     data = _deployment()
+
     if org == "org1":
         return Web3.to_checksum_address(data["hospitalAddress"])
+
     if org == "org2":
         return Web3.to_checksum_address(data["researcherAddress"])
+
+    if org.startswith("researcher:"):
+        raw_index = org.split(":", 1)[1]
+
+        try:
+            wallet_index = int(raw_index)
+        except ValueError as exc:
+            raise ValueError(f"Invalid researcher role: {org}") from exc
+
+        addresses = data.get("researcherAddresses") or []
+
+        if not 1 <= wallet_index <= len(addresses):
+            raise ValueError(
+                f"Researcher wallet index {wallet_index} is unavailable"
+            )
+
+        return Web3.to_checksum_address(
+            addresses[wallet_index - 1]
+        )
+
     raise ValueError(f"Unknown role: {org}")
+
+
+def account_address(org: str) -> str:
+    return _account(org)
 
 
 def _org_name(address: str) -> str:
     data = _deployment()
     value = (address or "").lower()
+
     if value == data["hospitalAddress"].lower():
         return "Org1MSP"
-    if value == data["researcherAddress"].lower():
-        return "Org2MSP"
+
+    for index, researcher_address in enumerate(
+        data.get("researcherAddresses") or [],
+        start=1,
+    ):
+        if value == researcher_address.lower():
+            return f"Researcher:{index}"
+
     return address
 
 
@@ -252,6 +286,7 @@ def health() -> dict[str, Any]:
         "contractAddress": data["contractAddress"],
         "hospitalAddress": data["hospitalAddress"],
         "researcherAddress": data["researcherAddress"],
+        "researcherAddresses": data["researcherAddresses"],
     }
 
 
