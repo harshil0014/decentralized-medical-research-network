@@ -23,6 +23,7 @@ researcher_token = "2" * 64
 os.environ["MEDICAL_REGISTRY_AUTH_DIR"] = str(auth)
 os.environ["MEDICAL_REGISTRY_RUNTIME_DIR"] = str(runtime / "runtime")
 os.environ["MEDICAL_KEY_ROOT"] = str(runtime / "keys")
+os.environ["MEDICAL_MASTER_KEY_HEX"] = "ab" * 32
 os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"] = str(
     runtime / "private-locators.json"
 )
@@ -73,6 +74,11 @@ assert dataset_id.startswith("ds-") and len(dataset_id) == 35
 assert dataset_label not in dataset_id
 assert upload.json()["metadataSummary"].startswith("sha256:")
 assert "Synthetic glucose cohort" not in upload.json()["metadataSummary"]
+
+key_files = sorted((runtime / "keys").glob("*.key"))
+assert len(key_files) == 1
+assert key_files[0].read_bytes().startswith(b"MEDKEY01")
+assert len(key_files[0].read_bytes()) > 32
 
 preview = client.get(
     f"/datasets/{dataset_id}/preview",
@@ -130,6 +136,10 @@ rotate = client.post(
 )
 assert rotate.status_code == 200, rotate.text
 assert rotate.json()["activeKeyVersion"] == 2
+key_files = sorted((runtime / "keys").glob("*.key"))
+assert len(key_files) == 2
+assert all(path.read_bytes().startswith(b"MEDKEY01") for path in key_files)
+assert all(len(path.read_bytes()) > 32 for path in key_files)
 
 he_create = client.post(
     "/he/glucose/encrypt",
