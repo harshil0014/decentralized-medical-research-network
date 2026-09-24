@@ -20,6 +20,8 @@
 - DICOM sanitization applies the PS3.15 2024b header rule table plus stricter free-text/private-tag/overlay cleanup and UID remapping.
 - CT/MR upload fails closed unless BurnedInAnnotation=NO, RecognizableVisualFeatures=NO, and the Hospital supplies an explicit pixel-review attestation.
 - Researcher plaintext dataset download is disabled by default; the normal access path is HE/compute-to-data.
+- Upload plaintext, DICOM/CSV staging, SEAL plaintext inputs, and Hospital HE secret-key workspaces are confined to verified Linux tmpfs/ramfs.
+- Researcher credential files and registry fail closed on broad POSIX permissions.
 - Medical multipart and application plaintext staging is restricted to verified RAM-backed tmpfs/ramfs.
 - Dataset AES keys are stored as AES-256-GCM-wrapped `MEDKEY01` blobs; the wrapping key must be injected externally and is never persisted by the app.
 - Successful upload/key rotation automatically refreshes an authenticated, chain-bound recovery bundle containing wrapped keys and private locators.
