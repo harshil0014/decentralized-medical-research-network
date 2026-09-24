@@ -14,7 +14,8 @@ Research access
 1. Researcher creates a request; free-text purpose is SHA-256 committed before Ethereum
 2. Hospital approves/rejects on Ethereum
 3. backend checks active consent and request state
-4. approved plaintext download is possible for the authorized researcher
+4. the default policy is compute-to-data/HE; plaintext download is blocked
+5. a controlled local demo may explicitly opt in with `MEDICAL_ALLOW_PLAINTEXT_DOWNLOADS=true`
 
 Homomorphic-encryption path
 1. Hospital derives numeric values and creates Microsoft SEAL CKKS ciphertext
@@ -54,4 +55,6 @@ DICOM SEG jobs require **two independently approved grants**: one for the source
 - AES keys and private dataset locator metadata remain Hospital-local.
 - Existing ciphertext keeps the key generation used at encryption time. Rotation creates a new active generation but does not rewrite old IPFS objects.
 - Service-token identities and the single-Hospital/single-Researcher local wallet mapping are prototype constraints, not a production decentralization model.
-- DICOM sanitization is not a formal HIPAA/GDPR/DPDP or DICOM PS3.15 compliance claim.
+- DICOM sanitization is not a formal HIPAA/GDPR/DPDP compliance claim.
+- CT/MR upload is fail-closed unless BurnedInAnnotation and RecognizableVisualFeatures are both `NO` and the Hospital explicitly attests that pixel data was visually reviewed.
+- Plaintext researcher release is disabled by default and is a deliberate demo-only opt-in.
