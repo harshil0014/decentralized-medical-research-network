@@ -29,7 +29,8 @@ Researcher
   -> requests access on Ethereum
   -> Hospital approves on Ethereum
   -> backend checks Solidity CanAccess-equivalent policy
-  -> approved encrypted object can be released
+  -> approved request enables privacy-preserving HE workflows
+  -> plaintext dataset release remains disabled unless explicitly opted in
 
 Homomorphic encryption
   -> Hospital creates Microsoft SEAL CKKS ciphertext
@@ -165,7 +166,7 @@ It covers:
 4. Ethereum registration and locator commitment
 5. Researcher access request
 6. Hospital approval
-7. approved download and integrity verification
+7. plaintext download is denied by default; controlled opt-in release is integrity-verified
 8. encryption-key rotation audit
 9. HE Average
 10. HE Average decryption
@@ -180,6 +181,8 @@ The GitHub Actions workflow `.github/workflows/ethereum-e2e.yml` executes the sa
 ## Safety / scope
 
 This is a research prototype, not production clinical infrastructure. Use only synthetic or properly de-identified data. It does not claim HIPAA, GDPR, DPDP, or hospital-production compliance.
+
+Researcher plaintext download is disabled by default. For an explicitly controlled local demo only, set `MEDICAL_ALLOW_PLAINTEXT_DOWNLOADS=true`; the default research path is HE/compute-to-data.
 
 
 ## Authorization invariants
