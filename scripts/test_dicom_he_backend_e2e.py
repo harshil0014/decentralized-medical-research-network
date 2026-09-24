@@ -71,6 +71,7 @@ def make_ct() -> bytes:
     ds.StudyDescription = "Synthetic CT HE validation"
     ds.SeriesDescription = "Synthetic axial CT"
     ds.BurnedInAnnotation = "NO"
+    ds.RecognizableVisualFeatures = "NO"
     ds.Rows = 4
     ds.Columns = 4
     ds.SamplesPerPixel = 1
@@ -142,6 +143,7 @@ upload = client.post(
         "data_type": "",
         "metadata_summary": "",
         "consent_state": "ACTIVE",
+        "visual_phi_reviewed": "true",
     },
     files={"file": ("ct.dcm", io.BytesIO(dicom_bytes), "application/dicom")},
 )
