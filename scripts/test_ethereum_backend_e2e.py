@@ -7,8 +7,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import hashlib
 import io
 import os
+import uuid
 import tempfile
 import time
 
@@ -30,6 +32,18 @@ os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"] = str(
 
 from fastapi.testclient import TestClient  # noqa: E402
 from backend.app import app  # noqa: E402
+from backend.storage_crypto import load_dataset_key  # noqa: E402
+
+legacy_dataset_id = "ds-" + uuid.uuid4().hex
+legacy_name = hashlib.sha256(legacy_dataset_id.encode("utf-8")).hexdigest()
+legacy_path = runtime / "keys" / f"{legacy_name}.key"
+legacy_path.parent.mkdir(parents=True, exist_ok=True)
+legacy_key = os.urandom(32)
+legacy_path.write_bytes(legacy_key)
+legacy_path.chmod(0o600)
+assert load_dataset_key(legacy_dataset_id, 1) == legacy_key
+assert legacy_path.read_bytes().startswith(b"MEDKEY01")
+assert legacy_path.read_bytes() != legacy_key
 
 client = TestClient(app)
 hospital = {"Authorization": f"Bearer {hospital_token}"}
