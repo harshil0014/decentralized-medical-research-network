@@ -11,7 +11,9 @@ from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, File,
 from pydantic import BaseModel
 
 from backend.api_auth import (
-    authenticated_role,
+    AuthIdentity,
+    authenticated_identity,
+    researcher_org,
     require_authenticated,
     require_hospital,
     require_researcher,
@@ -123,6 +125,7 @@ def _public_request_record(raw: str):
 
 
 from backend.ethereum_ledger import (
+    account_address as ethereum_account_address,
     health as ethereum_health,
     invoke as ethereum_invoke,
     invoke_private_org1 as ethereum_invoke_private_org1,
@@ -165,16 +168,21 @@ def health():
 
 @app.get("/auth/me")
 def auth_me(
-    role: str = Depends(
-        authenticated_role
-    ),
+    identity: AuthIdentity = Depends(authenticated_identity),
 ):
-    return {
+    result = {
         "authenticated": True,
-        "role": role,
+        "role": identity.role,
         "authMode": "service-token",
         "plaintextDownloadsEnabled": _plaintext_downloads_enabled(),
     }
+
+    if identity.role == "researcher":
+        org = researcher_org(identity)
+        result["researcherId"] = identity.researcher_id
+        result["ethereumAddress"] = ethereum_account_address(org)
+
+    return result
 
 
 @app.post("/datasets/upload", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
@@ -990,20 +998,26 @@ def rotate_dataset_encryption_key(
     }
 
 
-@app.post("/requests", dependencies=[Depends(require_researcher), Depends(require_mutation_lock)])
-def create_request(body: AccessRequestInput):
+@app.post("/requests", dependencies=[Depends(require_mutation_lock)])
+def create_request(
+    body: AccessRequestInput,
+    identity: AuthIdentity = Depends(require_researcher),
+):
     request_id = _opaque_request_id()
     dataset_id = _validate_opaque_dataset_id(body.dataset_id)
     purpose_commitment = _public_text_commitment(body.purpose, "purpose")
+    actor_org = researcher_org(identity)
 
     invoke(
         "RequestAccess",
         [request_id, dataset_id, purpose_commitment],
-        "org2",
+        actor_org,
     )
 
-    raw = query("ReadAccessRequest", [request_id], "org2")
-    return _public_request_record(raw)
+    raw = query("ReadAccessRequest", [request_id], actor_org)
+    record = _public_request_record(raw)
+    record["researcherId"] = identity.researcher_id
+    return record
 
 
 @app.get("/requests/{request_id}", dependencies=[Depends(require_authenticated)])
@@ -1028,8 +1042,11 @@ def revoke_request(request_id: str):
     return json.loads(raw)
 
 
-@app.get("/requests/{request_id}/download", dependencies=[Depends(require_researcher)])
-def download_dataset(request_id: str):
+@app.get("/requests/{request_id}/download")
+def download_dataset(
+    request_id: str,
+    identity: AuthIdentity = Depends(require_researcher),
+):
     if not _plaintext_downloads_enabled():
         raise HTTPException(
             status_code=403,
@@ -1040,10 +1057,13 @@ def download_dataset(request_id: str):
             ),
         )
 
+    actor_org = researcher_org(identity)
+    actor_address = ethereum_account_address(actor_org).lower()
+
     allowed = query(
         "CanAccess",
         [request_id],
-        "org2",
+        actor_org,
     )
 
     if allowed != "true":
@@ -1056,9 +1076,15 @@ def download_dataset(request_id: str):
         query(
             "ReadAccessRequest",
             [request_id],
-            "org2",
+            actor_org,
         )
     )
+
+    if str(request_data.get("requesterAddress") or "").lower() != actor_address:
+        raise HTTPException(
+            status_code=403,
+            detail="Access request belongs to a different researcher identity",
+        )
 
     dataset_data = json.loads(
         query(
