@@ -9,6 +9,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import hashlib
 import io
+import json
 import os
 import uuid
 import tempfile
@@ -19,13 +20,30 @@ auth = runtime / "auth"
 auth.mkdir(parents=True)
 hospital_token = "1" * 64
 researcher_token = "2" * 64
+researcher2_token = "5" * 64
 (auth / "hospital_api.token").write_text(hospital_token)
-(auth / "researcher_api.token").write_text(researcher_token)
+(auth / "researcher_a.token").write_text(researcher_token)
+(auth / "researcher_b.token").write_text(researcher2_token)
+(auth / "researchers.json").write_text(
+    json.dumps(
+        {
+            "schemaVersion": 1,
+            "researchers": [
+                {"id": "researcher-a", "tokenFile": "researcher_a.token", "walletIndex": 1},
+                {"id": "researcher-b", "tokenFile": "researcher_b.token", "walletIndex": 2},
+            ],
+        }
+    )
+)
+
+plaintext_ram = Path("/dev/shm") / f"medical-api-e2e-{os.getpid()}"
+plaintext_ram.mkdir(parents=True, exist_ok=True)
 
 os.environ["MEDICAL_REGISTRY_AUTH_DIR"] = str(auth)
 os.environ["MEDICAL_REGISTRY_RUNTIME_DIR"] = str(runtime / "runtime")
 os.environ["MEDICAL_KEY_ROOT"] = str(runtime / "keys")
 os.environ["MEDICAL_MASTER_KEY_HEX"] = os.urandom(32).hex()
+os.environ["MEDICAL_PLAINTEXT_TMPDIR"] = str(plaintext_ram)
 os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"] = str(
     runtime / "private-locators.json"
 )
@@ -48,6 +66,7 @@ assert legacy_path.read_bytes() != legacy_key
 client = TestClient(app)
 hospital = {"Authorization": f"Bearer {hospital_token}"}
 researcher = {"Authorization": f"Bearer {researcher_token}"}
+researcher2 = {"Authorization": f"Bearer {researcher2_token}"}
 
 suffix = str(int(time.time() * 1000))
 dataset_label = f"API-E2E-{suffix}"
@@ -67,6 +86,13 @@ csv_bytes = (
 
 health = client.get("/health")
 assert health.status_code == 200, health.text
+
+me1 = client.get("/auth/me", headers=researcher)
+me2 = client.get("/auth/me", headers=researcher2)
+assert me1.status_code == 200 and me2.status_code == 200
+assert me1.json()["researcherId"] == "researcher-a"
+assert me2.json()["researcherId"] == "researcher-b"
+assert me1.json()["ethereumAddress"].lower() != me2.json()["ethereumAddress"].lower()
 assert health.json()["blockchain"] == "ethereum"
 assert health.json()["ethereum"]["connected"] is True
 
@@ -134,6 +160,12 @@ assert "disabled by default" in download_blocked.json()["detail"]
 
 # Plaintext release is an explicit controlled-demo escape hatch, never default.
 os.environ["MEDICAL_ALLOW_PLAINTEXT_DOWNLOADS"] = "true"
+wrong_researcher_download = client.get(
+    f"/requests/{request_id}/download",
+    headers=researcher2,
+)
+assert wrong_researcher_download.status_code == 403, wrong_researcher_download.text
+
 download = client.get(
     f"/requests/{request_id}/download",
     headers=researcher,
@@ -167,6 +199,12 @@ he_create = client.post(
 assert he_create.status_code == 200, he_create.text
 average_job = he_create.json()["job_id"]
 assert he_create.json()["ethereum_status"] == "ENCRYPTED"
+
+wrong_compute = client.post(
+    f"/he/glucose/{average_job}/compute-average",
+    headers=researcher2,
+)
+assert wrong_compute.status_code == 403, wrong_compute.text
 
 he_compute = client.post(
     f"/he/glucose/{average_job}/compute-average",
