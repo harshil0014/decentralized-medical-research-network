@@ -61,15 +61,25 @@ def recovery_backup_path() -> Path:
         )
 
     path = Path(raw)
+    resolved = path.resolve()
     key_root = _key_root().resolve()
+    auth_root = Path(
+        os.environ.get(
+            "MEDICAL_REGISTRY_AUTH_DIR",
+            "/root/.medical-registry",
+        )
+    ).resolve()
 
-    try:
-        path.resolve().relative_to(key_root)
-    except ValueError:
-        pass
-    else:
+    for protected_root, label in (
+        (key_root, "dataset key directory"),
+        (auth_root, "authentication/private-locator directory"),
+    ):
+        try:
+            resolved.relative_to(protected_root)
+        except ValueError:
+            continue
         raise RuntimeError(
-            "Recovery backup must not be stored inside the dataset key directory"
+            f"Recovery backup must not be stored inside the {label}"
         )
 
     return path
