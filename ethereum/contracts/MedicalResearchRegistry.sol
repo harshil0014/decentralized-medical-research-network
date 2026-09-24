@@ -161,6 +161,83 @@ contract MedicalResearchRegistry {
         return true;
     }
 
+    function _ethSignedMessageHash(bytes32 digest) private pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", digest)
+        );
+    }
+
+    function _recoverSigner(
+        bytes32 digest,
+        bytes calldata signature
+    ) private pure returns (address) {
+        require(signature.length == 65, "invalid researcher signature");
+
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := calldataload(signature.offset)
+            s := calldataload(add(signature.offset, 32))
+            v := byte(0, calldataload(add(signature.offset, 64)))
+        }
+
+        if (v < 27) v += 27;
+        require(v == 27 || v == 28, "invalid signature v");
+
+        // Reject high-s malleable signatures (secp256k1n / 2).
+        require(
+            uint256(s)
+                <= 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0,
+            "invalid signature s"
+        );
+
+        address signer = ecrecover(
+            _ethSignedMessageHash(digest),
+            v,
+            r,
+            s
+        );
+        require(signer != address(0), "invalid researcher signature");
+        return signer;
+    }
+
+    function researcherRequestDigest(
+        string calldata requestId,
+        string calldata datasetId,
+        string calldata purpose
+    ) public view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                "MEDICAL_REQUEST_V1",
+                block.chainid,
+                address(this),
+                requestId,
+                datasetId,
+                purpose
+            )
+        );
+    }
+
+    function heComputeDigest(
+        string calldata jobId
+    ) public view returns (bytes32) {
+        HEJobRecord storage job = heJobs[jobId];
+        require(job.exists, "HE job missing");
+        return keccak256(
+            abi.encode(
+                "MEDICAL_HE_COMPUTE_V1",
+                block.chainid,
+                address(this),
+                jobId,
+                job.datasetId,
+                job.requestId,
+                job.ciphertextCid,
+                job.ciphertextManifestSha256
+            )
+        );
+    }
+
     function _pushDatasetHistory(string memory datasetId) private {
         Dataset memory snapshot = datasets[datasetId];
         datasetHistory[datasetId].push(snapshot);
@@ -274,12 +351,12 @@ contract MedicalResearchRegistry {
         return datasetHistory[datasetId];
     }
 
-    function requestAccess(
+    function requestAccessBySig(
         string calldata requestId,
         string calldata datasetId,
-        string calldata purpose
+        string calldata purpose,
+        bytes calldata researcherSignature
     ) external {
-        require(msg.sender != hospital, "hospital cannot request");
         require(_validOpaqueId(requestId, "req-"), "opaque requestId required");
         require(_validSha256Commitment(purpose), "purpose commitment required");
         require(!requests[requestId].exists, "request exists");
@@ -289,10 +366,16 @@ contract MedicalResearchRegistry {
         require(_eq(ds.consentState, "ACTIVE"), "dataset not active");
         require(_eq(ds.storageState, "PRIVATE_READY"), "dataset storage not ready");
 
+        address researcher = _recoverSigner(
+            researcherRequestDigest(requestId, datasetId, purpose),
+            researcherSignature
+        );
+        require(researcher != hospital, "hospital cannot request");
+
         requests[requestId] = AccessRequest({
             requestId: requestId,
             datasetId: datasetId,
-            requester: msg.sender,
+            requester: researcher,
             purpose: purpose,
             status: "PENDING",
             requestedAt: uint64(block.timestamp),
@@ -302,7 +385,7 @@ contract MedicalResearchRegistry {
         });
 
         _pushAccessHistory(requestId);
-        emit AccessRequested(requestId, datasetId, msg.sender);
+        emit AccessRequested(requestId, datasetId, researcher);
     }
 
     function getAccessRequest(string calldata requestId) external view returns (AccessRequest memory) {
@@ -442,19 +525,25 @@ contract MedicalResearchRegistry {
         return heJobs[jobId];
     }
 
-    function recordHEComputation(
+    function recordHEComputationBySig(
         string calldata jobId,
         string calldata resultCid,
-        string calldata resultSha256
+        string calldata resultSha256,
+        bytes calldata researcherSignature
     ) external {
         HEJobRecord storage job = heJobs[jobId];
         require(job.exists, "HE job missing");
-        require(msg.sender == job.researcher, "approved researcher only");
         require(_eq(job.status, "ENCRYPTED"), "HE job not encrypted");
         require(canAccess(job.requestId), "access no longer active");
         if (bytes(job.secondaryRequestId).length > 0) {
             require(canAccess(job.secondaryRequestId), "secondary access no longer active");
         }
+
+        address researcher = _recoverSigner(
+            heComputeDigest(jobId),
+            researcherSignature
+        );
+        require(researcher == job.researcher, "approved researcher signature required");
 
         job.resultCid = resultCid;
         job.resultSha256 = resultSha256;
