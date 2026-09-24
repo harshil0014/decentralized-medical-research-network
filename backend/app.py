@@ -25,6 +25,13 @@ from backend.runtime_security import (
     require_mutation_lock,
 )
 
+from backend.recovery import (
+    export_recovery_bundle,
+    recovery_backup_path,
+    restore_recovery_bundle,
+    snapshot_recovery_bundle,
+)
+
 from backend.secure_temp import (
     create_secure_plaintext_temp,
     secure_plaintext_temp_root,
@@ -215,6 +222,9 @@ def upload_dataset(
 
     client_dataset_label = (dataset_id or "").strip()
     dataset_id = _opaque_dataset_id()
+
+    # Fail before any durable mutation if disaster recovery is not configured.
+    recovery_backup_path()
 
     try:
         already_exists = (
@@ -724,6 +734,19 @@ def upload_dataset(
 
         record["uploadedFilename"] = file.filename
         record["storageEncryption"] = "AES-256-GCM"
+
+        try:
+            record["recoveryBackup"] = snapshot_recovery_bundle()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "Dataset committed, but recovery snapshot failed",
+                    "datasetId": dataset_id,
+                    "action": "Repair the recovery destination and create a snapshot before further mutations",
+                },
+            ) from exc
+
         return record
 
     finally:
@@ -857,6 +880,9 @@ def update_dataset_consent(dataset_id: str, body: ConsentUpdateInput):
 def rotate_dataset_encryption_key(
     dataset_id: str,
 ):
+    # Fail before generating a new key generation if recovery is not configured.
+    recovery_backup_path()
+
     dataset = json.loads(
         query(
             "ReadDatasetPrivate",
@@ -988,6 +1014,19 @@ def rotate_dataset_encryption_key(
         dataset_id
     )
 
+    try:
+        recovery = snapshot_recovery_bundle()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Key rotation committed, but recovery snapshot failed",
+                "datasetId": dataset_id,
+                "activeKeyVersion": new_version,
+                "action": "Repair the recovery destination and create a snapshot before further rotations",
+            },
+        ) from exc
+
     return {
         "datasetId": dataset_id,
         "previousKeyVersion": previous_version,
@@ -995,7 +1034,73 @@ def rotate_dataset_encryption_key(
             "activeKeyVersion"
         ],
         "ethereumAudit": audit,
+        "recoveryBackup": recovery,
     }
+
+
+@app.post("/admin/recovery/snapshot", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
+def create_recovery_snapshot():
+    try:
+        return snapshot_recovery_bundle()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Recovery snapshot failed: {exc}",
+        ) from exc
+
+
+@app.get("/admin/recovery/export", dependencies=[Depends(require_hospital)])
+def export_recovery_snapshot():
+    try:
+        bundle = export_recovery_bundle()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Recovery export failed: {exc}",
+        ) from exc
+
+    return Response(
+        content=bundle,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": 'attachment; filename="medical-recovery.medrec"',
+            "X-Recovery-Sha256": hashlib.sha256(bundle).hexdigest(),
+        },
+    )
+
+
+@app.post("/admin/recovery/restore", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
+def restore_recovery_snapshot(
+    backup: UploadFile = File(...),
+    replace_existing: bool = Form(False),
+):
+    try:
+        bundle = backup.file.read(64 * 1024 * 1024 + 1)
+        if len(bundle) > 64 * 1024 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail="Recovery bundle exceeds 64 MiB",
+            )
+
+        result = restore_recovery_bundle(
+            bundle,
+            replace_existing=replace_existing,
+        )
+        result["recoveryBackup"] = snapshot_recovery_bundle()
+        return result
+
+    except HTTPException:
+        raise
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Recovery restore failed: {exc}",
+        ) from exc
 
 
 @app.post("/requests", dependencies=[Depends(require_mutation_lock)])
