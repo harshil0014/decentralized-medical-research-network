@@ -128,10 +128,14 @@ def make_seg(source_bytes: bytes) -> bytes:
 
 
 suffix = str(int(time.time() * 1000))
-dataset_id = f"DICOM-HE-E2E-{suffix}"
-seg_dataset_id = f"DICOM-SEG-E2E-{suffix}"
-request_id = f"DICOM-HE-REQ-{suffix}"
-seg_request_id = f"DICOM-SEG-REQ-{suffix}"
+dataset_label = f"DICOM-HE-E2E-{suffix}"
+seg_dataset_label = f"DICOM-SEG-E2E-{suffix}"
+request_label = f"DICOM-HE-REQ-{suffix}"
+seg_request_label = f"DICOM-SEG-REQ-{suffix}"
+dataset_id = dataset_label
+seg_dataset_id = seg_dataset_label
+request_id = request_label
+seg_request_id = seg_request_label
 dicom_bytes = make_ct()
 seg_bytes = make_seg(dicom_bytes)
 
@@ -149,6 +153,9 @@ upload = client.post(
 )
 assert upload.status_code == 200, upload.text
 assert upload.json()["storageState"] == "PRIVATE_READY"
+dataset_id = upload.json()["datasetId"]
+assert dataset_id.startswith("ds-") and len(dataset_id) == 35
+assert dataset_label not in dataset_id
 assert upload.json()["dataType"] == "DICOM_CT"
 
 seg_upload = client.post(
@@ -164,6 +171,9 @@ seg_upload = client.post(
 )
 assert seg_upload.status_code == 200, seg_upload.text
 assert seg_upload.json()["storageState"] == "PRIVATE_READY"
+seg_dataset_id = seg_upload.json()["datasetId"]
+assert seg_dataset_id.startswith("ds-") and len(seg_dataset_id) == 35
+assert seg_dataset_label not in seg_dataset_id
 assert seg_upload.json()["dataType"] == "DICOM_SEG"
 
 segment_catalog = client.get(
@@ -185,6 +195,9 @@ request = client.post(
     },
 )
 assert request.status_code == 200, request.text
+request_id = request.json()["requestId"]
+assert request_id.startswith("req-") and len(request_id) == 36
+assert request_label not in request_id
 assert request.json()["status"] == "PENDING"
 
 approve = client.post(
@@ -204,6 +217,9 @@ seg_request = client.post(
     },
 )
 assert seg_request.status_code == 200, seg_request.text
+seg_request_id = seg_request.json()["requestId"]
+assert seg_request_id.startswith("req-") and len(seg_request_id) == 36
+assert seg_request_label not in seg_request_id
 assert seg_request.json()["status"] == "PENDING"
 
 seg_denied = client.post(
