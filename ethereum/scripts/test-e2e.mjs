@@ -9,7 +9,10 @@ const root = path.resolve(here, "..");
 const deployment = JSON.parse(fs.readFileSync(path.join(root, "deployment.json"), "utf8"));
 const abi = JSON.parse(fs.readFileSync(path.join(root, "build", "MedicalResearchRegistry.abi.json"), "utf8"));
 const provider = new ethers.JsonRpcProvider(deployment.rpcUrl);
-const hospital = await provider.getSigner(0);
+const hospitalKeyFile = (process.env.MEDICAL_HOSPITAL_PRIVATE_KEY_FILE || "").trim();
+const hospital = hospitalKeyFile
+  ? new ethers.Wallet(fs.readFileSync(hospitalKeyFile, "utf8").trim(), provider)
+  : await provider.getSigner(0);
 const researcher = ethers.Wallet.createRandom();
 const hospitalContract = new ethers.Contract(deployment.contractAddress, abi, hospital);
 
