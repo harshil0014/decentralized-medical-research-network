@@ -89,10 +89,12 @@ def hospital_dataset_preview(dataset_id: str):
         stored = fetch_ipfs_dataset_bytes(dataset["cid"])
         verify_dataset_bytes(stored, dataset["sha256"])
 
-        if is_encrypted_dataset(stored):
-            content = decrypt_bytes(dataset_id, stored)
-        else:
-            content = stored
+        if not is_encrypted_dataset(stored):
+            raise HTTPException(
+                status_code=422,
+                detail="Dataset is not an encrypted MEDAES object",
+            )
+        content = decrypt_bytes(dataset_id, stored)
 
         try:
             text = content.decode("utf-8-sig")

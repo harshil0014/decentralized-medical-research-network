@@ -32,6 +32,15 @@ const fakeResultSha = "b".repeat(64);
 const metadataCommitment = "sha256:" + "c".repeat(64);
 const purposeCommitment = "sha256:" + "d".repeat(64);
 const commitment = ethers.keccak256(ethers.toUtf8Bytes("bafy-demo:" + fakeSha));
+const otherResearcher = ethers.Wallet.createRandom();
+async function rejects(method, ...args) {
+  try {
+    await sendTx(hospitalContract, method, ...args);
+  } catch (_) {
+    return;
+  }
+  assert.fail(`${method} unexpectedly accepted invalid input`);
+}
 
 const hBalance = await provider.getBalance(await hospital.getAddress());
 assert(hBalance > ethers.parseEther("90"));
@@ -50,6 +59,11 @@ try {
   semanticDatasetBlocked = true;
 }
 assert.equal(semanticDatasetBlocked, true);
+
+for (const label of ["hiv_status", "BRCA1_mutation", "cancer_stage", "patient-alice"]) {
+  await rejects("registerDataset", "ds-" + randomBytes(16).toString("hex"), label,
+    metadataCommitment, "ACTIVE");
+}
 
 await sendTx(hospitalContract, "registerDataset", datasetId, "CSV", metadataCommitment, "ACTIVE");
 let ds = await hospitalContract.getDataset(datasetId);
@@ -84,6 +98,7 @@ try {
     invalidRequestId,
     datasetId,
     purposeCommitment,
+    researcher.address,
     invalidSignature
   );
 } catch (_) {
@@ -97,16 +112,43 @@ const requestDigest = await hospitalContract.researcherRequestDigest(
   purposeCommitment
 );
 const requestSignature = await researcher.signMessage(ethers.getBytes(requestDigest));
+const secondFactory = new ethers.ContractFactory(
+  abi,
+  fs.readFileSync(path.join(root, "build", "MedicalResearchRegistry.bytecode.txt"), "utf8").trim(),
+  hospital
+);
+const secondContract = await secondFactory.deploy();
+await secondContract.waitForDeployment();
+await sendTx(secondContract, "registerDataset", datasetId, "CSV", metadataCommitment, "ACTIVE");
+await sendTx(secondContract, "finalizeDataset", datasetId, commitment);
+assert.notEqual(await secondContract.researcherRequestDigest(requestId, datasetId, purposeCommitment), requestDigest);
+let crossContractReplayBlocked = false;
+try {
+  await sendTx(secondContract, "requestAccessBySig", requestId, datasetId,
+    purposeCommitment, researcher.address, requestSignature);
+} catch (_) {
+  crossContractReplayBlocked = true;
+}
+assert(crossContractReplayBlocked);
+await rejects("requestAccessBySig", requestId, datasetId, purposeCommitment,
+  researcher.address,
+  await otherResearcher.signMessage(ethers.getBytes(requestDigest)));
+// The first signature is valid for its own wallet; a request cannot be replayed
+// under a different opaque request identifier.
+await rejects("requestAccessBySig", "req-" + randomBytes(16).toString("hex"),
+  datasetId, purposeCommitment, researcher.address, requestSignature);
 await sendTx(
   hospitalContract,
   "requestAccessBySig",
   requestId,
   datasetId,
   purposeCommitment,
+  researcher.address,
   requestSignature
 );
 let req = await hospitalContract.getAccessRequest(requestId);
 assert.equal(req.status, "PENDING");
+assert.equal(req.requester.toLowerCase(), researcher.address.toLowerCase());
 
 await sendTx(hospitalContract, "decideAccess", requestId, "APPROVED");
 assert.equal(await hospitalContract.canAccess(requestId), true);
@@ -114,6 +156,11 @@ assert.equal(await hospitalContract.canAccess(requestId), true);
 await sendTx(hospitalContract, "recordKeyRotation", datasetId, 1, 2);
 const rotation = await hospitalContract.getKeyRotation(datasetId, 2);
 assert.equal(rotation.status, "COMMITTED");
+
+for (const label of ["hiv_status", "BRCA1_mutation", "cancer_stage", "patient-alice"]) {
+  await rejects("registerHEJob", jobId + "-" + label, datasetId, requestId,
+    "", "", label, 4, "bafy-ciphertext", fakeSha);
+}
 
 await sendTx(
   hospitalContract,
@@ -132,9 +179,22 @@ await sendTx(
 let job = await hospitalContract.getHEJob(jobId);
 assert.equal(job.status, "ENCRYPTED");
 assert.equal(job.researcher.toLowerCase(), researcher.address.toLowerCase());
+assert.equal(job.metric, "CSV:sha256:" + "e".repeat(64));
 
 const computeDigest = await hospitalContract.heComputeDigest(jobId);
 const computeSignature = await researcher.signMessage(ethers.getBytes(computeDigest));
+await rejects("recordHEComputationBySig", jobId, "bafy-result", fakeResultSha,
+  requestSignature);
+await rejects("recordHEComputationBySig", jobId, "bafy-result", fakeResultSha,
+  await otherResearcher.signMessage(ethers.getBytes(computeDigest)));
+const order = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+const rawSig = ethers.getBytes(computeSignature);
+const highS = ethers.concat([
+  rawSig.slice(0, 32),
+  ethers.zeroPadValue(ethers.toBeHex(order - BigInt(ethers.hexlify(rawSig.slice(32, 64)))), 32),
+  Uint8Array.from([rawSig[64] === 27 ? 28 : 27])
+]);
+await rejects("recordHEComputationBySig", jobId, "bafy-result", fakeResultSha, highS);
 await sendTx(
   hospitalContract,
   "recordHEComputationBySig",
@@ -168,6 +228,8 @@ const revokedComputeDigest = await hospitalContract.heComputeDigest(revokedJobId
 const revokedComputeSignature = await researcher.signMessage(
   ethers.getBytes(revokedComputeDigest)
 );
+await rejects("recordHEComputationBySig", revokedJobId, "bafy-result-revoke",
+  fakeResultSha, computeSignature);
 await sendTx(
   hospitalContract,
   "recordHEComputationBySig",

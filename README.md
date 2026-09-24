@@ -8,8 +8,10 @@ The active governance layer is:
 
 - **Ethereum-compatible local blockchain**
 - **Solidity smart contract**
-- **Ganache** local development network
-- **10 deterministic local accounts with 100 test ETH each**
+- **Four-validator Besu QBFT** permissioned demo network
+- **Three connected IPFS/Kubo peers** with three-way encrypted-object pinning
+
+Ganache is retained only for the faster compatibility/E2E test environment.
 
 Hyperledger Fabric is not used by the active runtime. Historical Fabric-era source remains only for migration/reference and must not be treated as an active security boundary.
 
@@ -27,7 +29,8 @@ Hospital
   -> encrypted recovery snapshot refreshed at configured external destination
 
 Researcher
-  -> authenticates with an individual service token mapped to a distinct Ethereum wallet
+  -> authenticates with an individual service token bound to an external Ethereum wallet address
+  -> signs requests and HE computations in MetaMask/EIP-1193
   -> sees discovery metadata
   -> requests access on Ethereum
   -> Hospital approves on Ethereum
@@ -47,9 +50,9 @@ Homomorphic encryption
 
 No raw medical file, plaintext patient value, AES key, or Microsoft SEAL secret key is written to Ethereum.
 
-Dataset and access-request identifiers written to Ethereum are server-generated opaque values (`ds-<32 hex>` and `req-<32 hex>`); Solidity rejects semantic/non-opaque IDs. Dataset descriptions and access purposes are always represented on Ethereum as `sha256:<digest>` commitments, and the Solidity contract rejects plaintext values. DICOM free-text Study/Series/Protocol descriptions are removed before encrypted storage.
+Dataset and access-request identifiers written to Ethereum are server-generated opaque values (`ds-<32 hex>` and `req-<32 hex>`); Solidity rejects semantic/non-opaque IDs. Dataset descriptions and access purposes are always represented on Ethereum as `sha256:<digest>` commitments. CSV metric names and DICOM analysis details appear only as `CSV:sha256:<digest>` or `DICOM:sha256:<digest>`. Solidity validates these formats. DICOM free-text Study/Series/Protocol descriptions are removed before encrypted storage.
 
-## One-shot local setup
+## Decentralized demo setup
 
 Requirements:
 
@@ -68,35 +71,39 @@ source backend/.venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Start Ganache, compile Solidity, deploy the contract, and run the Solidity E2E test:
+Start the four-validator Besu QBFT network and three IPFS peers, compile and deploy the contract, and run its E2E test:
 
 ```bash
-chmod +x scripts/setup_ethereum_local.sh
-./scripts/setup_ethereum_local.sh
+bash scripts/setup_decentralized_demo.sh
+source .runtime/decentralized/demo.env
+bash scripts/status_decentralized_demo.sh
+PYTHONPATH=. python3 scripts/test_decentralized_topology.py
 ```
 
-This creates:
+The test checks four distinct validators and three distinct IPFS peers, verifies contract state from all four RPC endpoints, retrieves a replicated object with the primary IPFS peer down, and checks ledger availability with one validator down. To stop the demo while retaining node data:
+
+```bash
+bash scripts/stop_decentralized_demo.sh
+```
+
+The setup creates:
 
 ```text
 ethereum/deployment.json
 ```
 
-The file contains only local development network metadata and account addresses. Ganache owns the unlocked local test accounts.
+The deployment file contains network metadata and public addresses. Besu RPC nodes do not hold researcher keys. The Hospital transaction key is stored in the external `~/.medical-decentralized/authority` directory by default. The backend tries the RPC endpoints in `MEDICAL_ETHEREUM_RPC_URLS` in order and fails over on transport failure.
 
-Start IPFS if it does not already exist:
+For the faster single-node Ganache CI compatibility path only:
 
 ```bash
-docker volume create medical-ipfs-data
-docker run -d --name medical-ipfs \
-  -v medical-ipfs-data:/data/ipfs \
-  -p 127.0.0.1:5001:5001 \
-  ipfs/kubo:v0.43.1
+bash scripts/setup_ethereum_local.sh
 ```
 
-Create one Hospital token and one token file per researcher, then map each researcher to a distinct Ganache wallet index:
+Create one Hospital token and one token file per researcher. Bind each researcher to the public address of a wallet they control in MetaMask. Private keys and seed phrases never belong in this registry or in backend environment variables:
 
 ```bash
-AUTH=/root/.medical-registry
+AUTH="${MEDICAL_REGISTRY_AUTH_DIR:-$HOME/.medical-decentralized/authority}"
 mkdir -p "$AUTH"
 chmod 700 "$AUTH"
 
@@ -107,23 +114,24 @@ chmod 600 "$AUTH"/*.token
 
 cat > "$AUTH/researchers.json" <<'JSON'
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "researchers": [
-    {"id": "researcher-a", "tokenFile": "researcher_a.token", "walletIndex": 1},
-    {"id": "researcher-b", "tokenFile": "researcher_b.token", "walletIndex": 2}
+    {"id": "researcher-a", "tokenFile": "researcher_a.token", "walletAddress": "0x<researcher-a-address>"},
+    {"id": "researcher-b", "tokenFile": "researcher_b.token", "walletAddress": "0x<researcher-b-address>"}
   ]
 }
 JSON
 chmod 600 "$AUTH/researchers.json"
 ```
 
-Ganache wallet index 0 is reserved for the Hospital. Researcher wallet indexes 1 through 9 are available, and duplicate researcher IDs, tokens, or wallet indexes are rejected at API startup.
+The address must match the wallet connected in the browser. Duplicate researcher IDs, tokens, or wallet addresses are rejected at API startup. The backend relays signed actions and pays demo gas through the Hospital account; it cannot sign as a researcher. `demo.env` points `MEDICAL_REGISTRY_AUTH_DIR` at the external Hospital authority directory; place token files and `researchers.json` there.
 
 The dataset-key wrapping secret must be **persistent across restarts** and supplied from outside the repository/key directory. Do not generate a new value every time the API starts. Also configure a recovery bundle destination outside the dataset-key directory, preferably on a separately backed-up or mounted volume:
 
 ```bash
 export MEDICAL_MASTER_KEY_HEX="<persistent 64-hex secret from your secret manager>"
 export MEDICAL_RECOVERY_BACKUP_PATH="/mnt/medical-recovery/medical-recovery.medrec"
+export MEDICAL_DATA_BACKUP_DIR="/mnt/medical-recovery/encrypted-objects"
 ./scripts/start_secure_api.sh
 ```
 
@@ -155,7 +163,7 @@ The contract implements:
 - encrypted-computation provenance
 - final-decryption provenance
 
-The Hospital is Ganache account 0. Individual researcher identities are assigned distinct Ganache accounts 1 through 9 through `/root/.medical-registry/researchers.json`.
+The Hospital controls governance and final HE decryption. Researchers control their own wallet keys. EIP-191 signatures bind chain ID, contract address, action and request/job identifiers; Solidity verifies the claimed researcher address and rejects high-s signatures.
 
 ## Private locator design
 
@@ -185,7 +193,7 @@ Python Ethereum adapter E2E:
 backend/.venv/bin/python scripts/test_ethereum_adapter.py
 ```
 
-Full backend E2E requires Ganache + IPFS + built Microsoft SEAL binaries:
+Full backend E2E requires a local Ethereum RPC, IPFS and built Microsoft SEAL binaries:
 
 ```bash
 backend/.venv/bin/python scripts/test_ethereum_backend_e2e.py
@@ -211,9 +219,10 @@ It covers:
 16. two independent researcher tokens map to different Ethereum wallets
 17. cross-researcher download/HE use is rejected
 18. medical upload staging is RAM-backed
-19. encrypted recovery-bundle authentication, destructive key/locator loss, and verified restore
+19. encrypted recovery-bundle authentication, destructive key/locator/IPFS loss, and verified restore
+20. plaintext IPFS object rejection and wallet signature checks
 
-The GitHub Actions workflow `.github/workflows/ethereum-e2e.yml` executes the same migration path on every push to the migration branch.
+The GitHub Actions workflow `.github/workflows/ethereum-e2e.yml` runs the full backend suite and the separate four-validator/three-peer topology suite on pushes to `dicom-he-v1`.
 
 ## Safety / scope
 
@@ -236,7 +245,7 @@ Medical uploads are fail-closed unless a RAM-backed staging filesystem is availa
 
 ## Researcher identity isolation
 
-Each configured researcher has a unique service token, researcher ID, and Ganache wallet index. Access requests are signed by that identity's wallet. HE computation and controlled plaintext-release checks verify that the authenticated researcher's wallet matches the request/job researcher. The Solidity contract independently enforces the researcher address recorded on the HE job.
+Each configured researcher has a unique service token, researcher ID, and externally owned wallet address. Access requests and HE computations are signed by that wallet. The backend checks the authenticated address before relay, and Solidity independently checks the claimed request signer and the approved HE-job researcher.
 
 ## Dataset-key protection
 
@@ -249,6 +258,6 @@ Dataset key rotation creates a new active AES key generation for future encrypte
 
 ## Disaster recovery
 
-Successful dataset registration and key rotation automatically refresh an encrypted `MEDREC01` recovery bundle at `MEDICAL_RECOVERY_BACKUP_PATH`. The bundle contains the wrapped dataset-key registry and Hospital-private CID/SHA locators, is AES-GCM authenticated under a recovery key derived from the external master secret, and is bound to the current Ethereum chain ID and contract address.
+Successful dataset registration and key rotation automatically refresh an encrypted `MEDREC01` recovery bundle at `MEDICAL_RECOVERY_BACKUP_PATH`. The bundle contains the wrapped dataset-key registry, Hospital-private CID/SHA locators and an authenticated manifest of encrypted-object backups. The encrypted MEDAES objects themselves live in `MEDICAL_DATA_BACKUP_DIR`, outside the primary key/auth/IPFS directories. The bundle is AES-GCM authenticated under a recovery key derived from the external master secret and bound to the current Ethereum chain ID and contract address.
 
-Hospital-only recovery endpoints support snapshot, encrypted export, and transactional restore. Restore validates bundle authentication, file hashes, chain/contract identity, dataset-key metadata and every restored private locator commitment against Ethereum. A failed verification rolls the local restore back. The configured recovery path is rejected if it is inside the key directory or auth/private-locator directory. Keep it in a separate backup failure domain; software cannot protect against losing the external master secret and every copy of the recovery bundle simultaneously.
+Hospital-only recovery endpoints support snapshot, encrypted export, and restore. Restore validates bundle authentication, encrypted-object SHA, chain/contract identity, dataset-key metadata and every private locator commitment against Ethereum, then restores missing encrypted objects to the replicated IPFS layer and verifies their CIDs. A failed verification rolls local keys and locators back. Both backup destinations must be in a separate failure domain; the demo exports `MEDICAL_IPFS_DATA_ROOT` so backup paths inside the primary IPFS data directory are rejected. Historical pre-encryption prototype data must be re-imported and re-encrypted; plaintext IPFS compatibility was intentionally removed.

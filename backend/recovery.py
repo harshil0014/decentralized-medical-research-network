@@ -74,11 +74,13 @@ def recovery_backup_path() -> Path:
             "/root/.medical-registry",
         )
     ).resolve()
+    ipfs_root_raw = os.environ.get("MEDICAL_IPFS_DATA_ROOT", "").strip()
+    protected_roots = [(key_root, "dataset key directory"),
+                       (auth_root, "authentication/private-locator directory")]
+    if ipfs_root_raw:
+        protected_roots.append((Path(ipfs_root_raw).resolve(), "primary IPFS data directory"))
 
-    for protected_root, label in (
-        (key_root, "dataset key directory"),
-        (auth_root, "authentication/private-locator directory"),
-    ):
+    for protected_root, label in protected_roots:
         try:
             resolved.relative_to(protected_root)
         except ValueError:
@@ -377,6 +379,7 @@ def restore_recovery_bundle(
         else None
     )
 
+    restored_cids: list[str] = []
     try:
         for path, raw in targets.items():
             _atomic_write(path, raw)
@@ -404,6 +407,7 @@ def restore_recovery_bundle(
             locators,
             expected_manifest=payload["objectBackups"],
         )
+        restored_cids = ipfs_recovery.pop("restoredCids")
 
         verified = 0
         for dataset_id in sorted(locators):
@@ -412,6 +416,9 @@ def restore_recovery_bundle(
             verified += 1
 
     except Exception:
+        from backend.ipfs_storage import unpin as ipfs_unpin
+        for cid in restored_cids:
+            ipfs_unpin(cid)
         current_managed = {
             path
             for path in key_root.iterdir()

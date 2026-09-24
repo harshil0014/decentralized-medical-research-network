@@ -12,6 +12,8 @@ from pathlib import Path
 from backend.ipfs_storage import (
     add_file as ipfs_add_file,
     has as ipfs_has,
+    replicate_cid,
+    unpin as ipfs_unpin,
 )
 
 
@@ -39,11 +41,13 @@ def _backup_root() -> Path:
             "/root/.medical-registry",
         )
     ).resolve()
+    ipfs_root_raw = os.environ.get("MEDICAL_IPFS_DATA_ROOT", "").strip()
+    protected_roots = [(key_root, "dataset key directory"),
+                       (auth_root, "authentication/private-locator directory")]
+    if ipfs_root_raw:
+        protected_roots.append((Path(ipfs_root_raw).resolve(), "primary IPFS data directory"))
 
-    for protected_root, label in (
-        (key_root, "dataset key directory"),
-        (auth_root, "authentication/private-locator directory"),
-    ):
+    for protected_root, label in protected_roots:
         try:
             root.relative_to(protected_root)
         except ValueError:
@@ -216,6 +220,8 @@ def restore_missing_ipfs_objects(
 ) -> dict:
     restored = 0
     already_present = 0
+    checked: list[tuple[str, str]] = []
+    restored_cids: list[str] = []
 
     for dataset_id, locator in sorted(locators.items()):
         cid = str((locator or {}).get("cid") or "").strip()
@@ -238,20 +244,31 @@ def restore_missing_ipfs_objects(
                     f"Recovery bundle backup manifest mismatch for {dataset_id}"
                 )
 
-        if ipfs_has(cid):
-            already_present += 1
-            continue
+        checked.append((dataset_id, cid))
 
-        object_path, _ = _paths(dataset_id)
-        restored_cid = ipfs_add_file(object_path)
-        if restored_cid != cid:
-            raise RuntimeError(
-                f"Restored IPFS CID mismatch for {dataset_id}"
-            )
-        restored += 1
+    try:
+        for dataset_id, cid in checked:
+            if ipfs_has(cid):
+                replicate_cid(cid)
+                already_present += 1
+                continue
+
+            object_path, _ = _paths(dataset_id)
+            restored_cid = ipfs_add_file(object_path)
+            restored_cids.append(restored_cid)
+            if restored_cid != cid:
+                raise RuntimeError(
+                    f"Restored IPFS CID mismatch for {dataset_id}"
+                )
+            restored += 1
+    except Exception:
+        for cid in restored_cids:
+            ipfs_unpin(cid)
+        raise
 
     return {
         "restoredIpfsObjects": restored,
         "existingIpfsObjects": already_present,
         "verifiedObjectBackups": len(locators),
+        "restoredCids": restored_cids,
     }

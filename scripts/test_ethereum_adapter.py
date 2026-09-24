@@ -39,7 +39,7 @@ researcher_org = f"researcher-address:{researcher.address}"
 
 state = health()
 assert state["connected"] is True
-assert state["network"] == "Ganache"
+assert state["network"] in {"Ganache", "Besu-QBFT-4"}
 
 invoke(
     "RegisterDataset",
@@ -76,7 +76,7 @@ request_signature = Account.sign_message(
 ).signature.hex()
 invoke(
     "RequestAccessSigned",
-    [request_id, dataset_id, purpose_commitment, request_signature],
+    [request_id, dataset_id, purpose_commitment, researcher.address, request_signature],
     "org1",
 )
 invoke("DecideAccess", [request_id, "APPROVED"], "org1")

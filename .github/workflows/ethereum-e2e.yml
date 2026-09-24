@@ -1,9 +1,10 @@
-name: Ethereum Solidity Ganache E2E
+name: Medical research full E2E
 
 on:
   push:
     branches:
       - main
+      - dicom-he-v1
   pull_request:
     branches:
       - main
@@ -87,3 +88,21 @@ jobs:
         run: |
           backend/.venv/bin/python scripts/test_ethereum_backend_e2e.py
           PYTHONPATH=. backend/.venv/bin/python scripts/test_dicom_he_backend_e2e.py
+
+  decentralized-demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install RPC adapter dependencies
+        run: python -m pip install "fastapi>=0.115,<1" "web3>=7,<8"
+      - name: Start four-validator Besu and three-peer IPFS network
+        run: bash scripts/setup_decentralized_demo.sh
+      - name: Verify distinct nodes, shared state and outage recovery
+        run: PYTHONPATH=. python scripts/test_decentralized_topology.py

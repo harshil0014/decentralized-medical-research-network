@@ -31,6 +31,38 @@ PRIVATE_LOCATOR_PATH = Path(
 )
 
 
+class _FailoverHTTPProvider(Web3.HTTPProvider):
+    """Retry transport failures against configured RPC replicas."""
+
+    def __init__(self, urls: list[str], expected_chain_id: int | None):
+        super().__init__(urls[0], request_kwargs={"timeout": 10})
+        self._replicas = [
+            Web3.HTTPProvider(url, request_kwargs={"timeout": 10})
+            for url in urls
+        ]
+        self._active = 0
+        self._expected_chain_id = expected_chain_id
+        self._validated: set[int] = set()
+
+    def make_request(self, method, params):
+        last_error = None
+        for offset in range(len(self._replicas)):
+            index = (self._active + offset) % len(self._replicas)
+            try:
+                if self._expected_chain_id is not None and index not in self._validated:
+                    chain = self._replicas[index].make_request("eth_chainId", [])
+                    if int(chain.get("result", "0x0"), 16) != self._expected_chain_id:
+                        raise RuntimeError("Ethereum RPC chain ID differs from deployment")
+                    self._validated.add(index)
+                response = self._replicas[index].make_request(method, params)
+            except Exception as exc:
+                last_error = exc
+                continue
+            self._active = index
+            return response
+        raise RuntimeError("All Ethereum RPC endpoints are unavailable") from last_error
+
+
 def _http_error(action: str, exc: Exception) -> HTTPException:
     return HTTPException(
         status_code=500,
@@ -65,9 +97,16 @@ def _deployment() -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def _web3() -> Web3:
     data = _deployment()
-    w3 = Web3(Web3.HTTPProvider(data["rpcUrl"], request_kwargs={"timeout": 30}))
+    configured = os.environ.get("MEDICAL_ETHEREUM_RPC_URLS", "")
+    urls = [url.strip() for url in configured.split(",") if url.strip()]
+    if not urls:
+        urls = [data["rpcUrl"]]
+    expected_chain_id = int(data["chainId"]) if data.get("chainId") is not None else None
+    w3 = Web3(_FailoverHTTPProvider(urls, expected_chain_id))
     if not w3.is_connected():
-        raise RuntimeError(f"Cannot connect to Ethereum RPC at {data['rpcUrl']}")
+        raise RuntimeError("Cannot connect to any configured Ethereum RPC")
+    if data.get("chainId") is not None and w3.eth.chain_id != int(data["chainId"]):
+        raise RuntimeError("Ethereum RPC chain ID differs from deployment")
     return w3
 
 
@@ -383,7 +422,8 @@ def invoke(function: str, args: list[str], org: str) -> None:
     if function == "RequestAccessSigned":
         _send(
             "requestAccessBySig",
-            [args[0], args[1], args[2], bytes.fromhex(args[3].removeprefix("0x"))],
+            [args[0], args[1], args[2], Web3.to_checksum_address(args[3]),
+             bytes.fromhex(args[4].removeprefix("0x"))],
             "org1",
         )
         return

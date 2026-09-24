@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-AUTH=/root/.medical-registry
+AUTH="${MEDICAL_REGISTRY_AUTH_DIR:-/root/.medical-registry}"
 TLS="$AUTH/tls"
 
 test -s "$AUTH/hospital_api.token"

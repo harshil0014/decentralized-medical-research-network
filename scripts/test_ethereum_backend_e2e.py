@@ -11,9 +11,11 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import uuid
 import tempfile
 import time
+from unittest.mock import patch
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -76,6 +78,11 @@ from backend.app import app  # noqa: E402
 from backend.storage_crypto import load_dataset_key  # noqa: E402
 from backend.he_service import RUNTIME_ROOT as HE_RUNTIME_ROOT  # noqa: E402
 from backend.dicom_he_service import RUNTIME_ROOT as DICOM_HE_RUNTIME_ROOT  # noqa: E402
+from backend.ipfs_storage import has as ipfs_has, ipfs_containers, unpin as ipfs_unpin  # noqa: E402
+from backend.ipfs_storage import add_file as ipfs_add_file  # noqa: E402
+from backend.ethereum_ledger import invoke, invoke_private_org1  # noqa: E402
+from backend.storage_crypto import get_or_create_dataset_key  # noqa: E402
+from backend.recovery import restore_recovery_bundle  # noqa: E402
 
 legacy_dataset_id = "ds-" + uuid.uuid4().hex
 legacy_name = hashlib.sha256(legacy_dataset_id.encode("utf-8")).hexdigest()
@@ -183,6 +190,11 @@ assert dataset_id.startswith("ds-") and len(dataset_id) == 35
 assert dataset_label not in dataset_id
 assert upload.json()["metadataSummary"].startswith("sha256:")
 assert "Synthetic glucose cohort" not in upload.json()["metadataSummary"]
+public_dataset = client.get(f"/datasets/{dataset_id}", headers=hospital)
+assert public_dataset.status_code == 200, public_dataset.text
+assert public_dataset.json()["dataType"] == "CSV"
+assert all(label not in json.dumps(public_dataset.json()) for label in
+           ("hiv_status", "BRCA1_mutation", "cancer_stage", "patient_code"))
 assert upload.json()["recoveryBackup"]["size"] > 0
 assert not list(plaintext_ram.glob("medical-plaintext-*"))
 
@@ -197,6 +209,27 @@ preview = client.get(
 )
 assert preview.status_code == 200, preview.text
 assert "glucose_mg_dl" in preview.json()["columns"]
+
+prepared_wrong = client.post(
+    "/requests/prepare", headers=researcher,
+    json={"dataset_id": dataset_id, "purpose": "Synthetic glucose analysis"},
+)
+assert prepared_wrong.status_code == 200, prepared_wrong.text
+wrong_payload = prepared_wrong.json()
+wrong_signature = sign_digest(researcher2_wallet, wrong_payload["signingDigest"])
+wrong_request = client.post(
+    "/requests", headers=researcher,
+    json={"request_id": wrong_payload["requestId"], "dataset_id": dataset_id,
+          "purpose": "Synthetic glucose analysis", "signature": wrong_signature},
+)
+assert wrong_request.status_code == 403, wrong_request.text
+replayed_signature = sign_digest(researcher_wallet, wrong_payload["signingDigest"])
+replayed_request = client.post(
+    "/requests", headers=researcher,
+    json={"request_id": "req-" + uuid.uuid4().hex, "dataset_id": dataset_id,
+          "purpose": "Synthetic glucose analysis", "signature": replayed_signature},
+)
+assert replayed_request.status_code == 403, replayed_request.text
 
 create = create_signed_request(
     researcher,
@@ -282,6 +315,10 @@ recovery_bundle = recovery_path.read_bytes()
 assert recovery_bundle.startswith(b"MEDREC01")
 assert csv_bytes not in recovery_bundle
 
+locator_path = Path(os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"])
+encrypted_cid = json.loads(locator_path.read_text())[dataset_id]["cid"]
+assert ipfs_has(encrypted_cid)
+
 tampered = bytearray(recovery_bundle)
 tampered[-1] ^= 0x01
 tampered_restore = client.post(
@@ -298,11 +335,53 @@ tampered_restore = client.post(
 )
 assert tampered_restore.status_code == 400, tampered_restore.text
 
+correct_master = os.environ["MEDICAL_MASTER_KEY_HEX"]
+os.environ["MEDICAL_MASTER_KEY_HEX"] = os.urandom(32).hex()
+wrong_key_restore = client.post(
+    "/admin/recovery/restore", headers=hospital,
+    data={"replace_existing": "true"},
+    files={"backup": ("wrong-key.medrec", io.BytesIO(recovery_bundle),
+                       "application/octet-stream")},
+)
+os.environ["MEDICAL_MASTER_KEY_HEX"] = correct_master
+assert wrong_key_restore.status_code == 400, wrong_key_restore.text
+
+with patch("backend.recovery._ledger_fingerprint",
+           return_value={"chainId": 987654, "contractAddress": "0x" + "0" * 40}):
+    try:
+        restore_recovery_bundle(recovery_bundle, replace_existing=True)
+    except ValueError as exc:
+        assert "different chain or contract" in str(exc)
+    else:
+        raise AssertionError("Cross-deployment recovery was accepted")
+
+encrypted_backup_path = Path(os.environ["MEDICAL_DATA_BACKUP_DIR"]) / f"{dataset_id}.medobj"
+untampered_object = encrypted_backup_path.read_bytes()
+corrupt_object = bytearray(untampered_object)
+corrupt_object[-1] ^= 1
+encrypted_backup_path.write_bytes(corrupt_object)
+corrupt_restore = client.post(
+    "/admin/recovery/restore", headers=hospital,
+    data={"replace_existing": "true"},
+    files={"backup": ("corrupt-object.medrec", io.BytesIO(recovery_bundle),
+                       "application/octet-stream")},
+)
+encrypted_backup_path.write_bytes(untampered_object)
+assert corrupt_restore.status_code != 200, corrupt_restore.text
+assert client.get(f"/datasets/{dataset_id}/preview", headers=hospital).status_code == 200
+
 for path in (runtime / "keys").iterdir():
     if path.is_file():
         path.unlink()
-locator_path = Path(os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"])
 locator_path.unlink()
+ipfs_unpin(encrypted_cid)
+for container in ipfs_containers():
+    removed = subprocess.run(
+        ["docker", "exec", container, "ipfs", "block", "rm", encrypted_cid],
+        capture_output=True, text=True,
+    )
+    assert removed.returncode == 0, removed.stderr
+assert not ipfs_has(encrypted_cid), "Encrypted IPFS object survived destructive loss"
 
 broken_preview = client.get(
     f"/datasets/{dataset_id}/preview",
@@ -325,6 +404,8 @@ restored = client.post(
 assert restored.status_code == 200, restored.text
 assert restored.json()["verifiedDatasets"] >= 1
 assert restored.json()["restoredKeyFiles"] >= 3
+assert restored.json()["restoredIpfsObjects"] == 1
+assert ipfs_has(encrypted_cid)
 
 restored_preview = client.get(
     f"/datasets/{dataset_id}/preview",
@@ -380,6 +461,8 @@ history = client.get(
 )
 assert ledger.status_code == 200, ledger.text
 assert ledger.json()["status"] == "DECRYPTED"
+assert ledger.json()["metric"].startswith("CSV:sha256:")
+assert "glucose_mg_dl" not in json.dumps(ledger.json())
 assert history.status_code == 200, history.text
 assert len(history.json()) >= 3
 
@@ -478,4 +561,22 @@ denied2 = client.get(
 )
 assert denied2.status_code == 403
 
-print("FASTAPI + GANACHE + IPFS + AES + SEAL E2E: PASS")
+# A committed locator pointing to raw medical plaintext is rejected even
+# when the private CID/SHA commitment itself is valid.
+raw_dataset_id = "ds-" + uuid.uuid4().hex
+raw_source = runtime / "raw-plaintext-test.csv"
+raw_source.write_bytes(csv_bytes)
+raw_cid = ipfs_add_file(raw_source)
+raw_sha = hashlib.sha256(csv_bytes).hexdigest()
+get_or_create_dataset_key(raw_dataset_id)
+invoke("RegisterDataset", [raw_dataset_id, "CSV", "sha256:" + "f" * 64,
+                           "ACTIVE"], "org1")
+invoke_private_org1("StoreDatasetLocatorPrivate", [raw_dataset_id],
+                    {"dataset_locator": {"cid": raw_cid, "sha256": raw_sha}})
+invoke("FinalizeDatasetRegistration", [raw_dataset_id], "org1")
+raw_preview = client.get(f"/datasets/{raw_dataset_id}/preview", headers=hospital)
+assert raw_preview.status_code == 422, raw_preview.text
+ipfs_unpin(raw_cid)
+raw_source.unlink()
+
+print("FASTAPI + ETHEREUM + IPFS + AES + SEAL E2E: PASS")

@@ -2,19 +2,19 @@
 
 ## Implemented
 
-- Solidity governance contract on local Ganache
+- Solidity governance contract on a four-validator Besu QBFT demo network (Ganache for fast CI compatibility)
 - AES-256-GCM encrypted-at-rest dataset storage
-- IPFS encrypted object storage
+- encrypted object and HE artifact storage pinned across three IPFS peers
 - private local CID/SHA metadata with on-chain commitment
 - opaque server-issued dataset/request IDs enforced by Solidity
 - AES-256-GCM-wrapped dataset-key files with an externally supplied master wrapping key
 - verified RAM-backed tmpfs/ramfs staging for medical plaintext, including multipart spooling
-- automatic AES-GCM-authenticated disaster-recovery snapshots for wrapped keys + private locators
-- chain-bound transactional recovery restore with Ethereum locator verification
-- distinct researcher identities mapped to distinct Ganache wallets with cross-researcher isolation
+- automatic AES-GCM-authenticated recovery snapshots for wrapped keys, private locators and encrypted-object manifests
+- chain-bound recovery restore with encrypted-object SHA/CID and Ethereum locator verification
+- distinct researcher service identities bound to externally owned Ethereum wallets and EIP-191 signatures
 - consent/access request approve/reject/revoke
 - key-generation rotation audit
-- HTTPS localhost FastAPI with a Hospital token and per-researcher token-to-wallet registry
+- HTTPS localhost FastAPI with a Hospital token and per-researcher token-to-public-address registry
 - CSV numeric HE Average/SUM using Microsoft SEAL CKKS
 - DICOM CT/MR sanitization and encrypted storage
 - DICOM whole-volume, slice and ROI-box CKKS statistics

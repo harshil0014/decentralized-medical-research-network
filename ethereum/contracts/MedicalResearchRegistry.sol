@@ -232,8 +232,13 @@ contract MedicalResearchRegistry {
                 jobId,
                 job.datasetId,
                 job.requestId,
+                job.secondaryDatasetId,
+                job.secondaryRequestId,
+                job.metric,
+                job.cohortSize,
                 job.ciphertextCid,
-                job.ciphertextManifestSha256
+                job.ciphertextManifestSha256,
+                job.researcher
             )
         );
     }
@@ -355,6 +360,7 @@ contract MedicalResearchRegistry {
         string calldata requestId,
         string calldata datasetId,
         string calldata purpose,
+        address claimedResearcher,
         bytes calldata researcherSignature
     ) external {
         require(_validOpaqueId(requestId, "req-"), "opaque requestId required");
@@ -370,6 +376,7 @@ contract MedicalResearchRegistry {
             researcherRequestDigest(requestId, datasetId, purpose),
             researcherSignature
         );
+        require(researcher == claimedResearcher, "researcher signature mismatch");
         require(researcher != hospital, "hospital cannot request");
 
         requests[requestId] = AccessRequest({

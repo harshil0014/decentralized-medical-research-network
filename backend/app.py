@@ -9,8 +9,6 @@ import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, File, Form
 from pydantic import BaseModel
-from eth_account import Account
-from eth_account.messages import encode_defunct
 
 from backend.api_auth import (
     AuthIdentity,
@@ -20,6 +18,7 @@ from backend.api_auth import (
     require_hospital,
     require_researcher,
 )
+from backend.researcher_signing import verify_researcher_signature
 
 from backend.frontend_ui import router as frontend_router
 from backend.data_backup import (
@@ -147,21 +146,7 @@ def _verify_researcher_signature(
     digest: str,
     signature: str,
 ) -> None:
-    expected = (identity.wallet_address or "").lower()
-    if not expected:
-        raise HTTPException(status_code=403, detail="External researcher wallet is not configured")
-    try:
-        recovered = Account.recover_message(
-            encode_defunct(hexstr=digest),
-            signature=signature,
-        ).lower()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid researcher wallet signature") from exc
-    if recovered != expected:
-        raise HTTPException(
-            status_code=403,
-            detail="Signature does not match the authenticated researcher wallet",
-        )
+    verify_researcher_signature(identity, digest, signature)
 
 
 def _public_request_record(raw: str):
@@ -823,17 +808,8 @@ def list_datasets():
             "updatedAt": r["updatedAt"],
         }
         for r in records
-        if (
-            r.get("consentState") == "ACTIVE"
-            and r.get(
-                "storageState",
-                "LEGACY_PUBLIC",
-            )
-            in {
-                "LEGACY_PUBLIC",
-                "PRIVATE_READY",
-            }
-        )
+        if r.get("consentState") == "ACTIVE"
+        and r.get("storageState") == "PRIVATE_READY"
     ]
 
 
@@ -1163,7 +1139,7 @@ def create_request(
 
     invoke(
         "RequestAccessSigned",
-        [request_id, dataset_id, purpose_commitment, body.signature],
+        [request_id, dataset_id, purpose_commitment, identity.wallet_address, body.signature],
         "org1",
     )
 

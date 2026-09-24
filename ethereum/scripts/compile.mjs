@@ -15,7 +15,9 @@ const input = {
   settings: {
     optimizer: { enabled: true, runs: 200 },
     viaIR: true,
-    evmVersion: "shanghai",
+    // The permissioned QBFT genesis starts at Berlin. Avoid PUSH0 opcodes
+    // so one artifact works on both Besu and the Ganache compatibility runner.
+    evmVersion: "berlin",
     outputSelection: {
       "*": {
         "*": ["abi", "evm.bytecode.object"]

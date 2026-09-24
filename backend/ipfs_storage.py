@@ -37,7 +37,7 @@ def replicate_cid(cid: str) -> None:
     if not cid:
         raise ValueError("IPFS CID is required")
     failures: list[str] = []
-    for container in ipfs_containers()[1:]:
+    for container in ipfs_containers():
         result = _exec(container, ["pin", "add", cid], timeout=240)
         if result.returncode != 0:
             failures.append(
