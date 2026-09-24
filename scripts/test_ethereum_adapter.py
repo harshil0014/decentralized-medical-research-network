@@ -38,7 +38,7 @@ assert state["network"] == "Ganache"
 
 invoke(
     "RegisterDataset",
-    [dataset_id, "LAB_CSV", "sha256:" + "a" * 64, "ACTIVE"],
+    [dataset_id, "CSV", "sha256:" + "a" * 64, "ACTIVE"],
     "org1",
 )
 invoke_private_org1(
@@ -75,7 +75,7 @@ invoke(
         request_id,
         "",
         "",
-        "glucose_mg_dl",
+        "CSV:sha256:" + "d" * 64,
         "4",
         "bafy-python-cipher",
         "b" * 64,
