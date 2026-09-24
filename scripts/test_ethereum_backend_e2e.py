@@ -58,6 +58,8 @@ os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"] = str(
 from fastapi.testclient import TestClient  # noqa: E402
 from backend.app import app  # noqa: E402
 from backend.storage_crypto import load_dataset_key  # noqa: E402
+from backend.he_service import RUNTIME_ROOT as HE_RUNTIME_ROOT  # noqa: E402
+from backend.dicom_he_service import RUNTIME_ROOT as DICOM_HE_RUNTIME_ROOT  # noqa: E402
 
 legacy_dataset_id = "ds-" + uuid.uuid4().hex
 legacy_name = hashlib.sha256(legacy_dataset_id.encode("utf-8")).hexdigest()
@@ -69,6 +71,10 @@ legacy_path.chmod(0o600)
 assert load_dataset_key(legacy_dataset_id, 1) == legacy_key
 assert legacy_path.read_bytes().startswith(b"MEDKEY01")
 assert legacy_path.read_bytes() != legacy_key
+
+for runtime_root in (HE_RUNTIME_ROOT, DICOM_HE_RUNTIME_ROOT):
+    runtime_root.resolve().relative_to(plaintext_ram.resolve())
+    assert str(runtime_root).startswith(str(plaintext_ram))
 
 client = TestClient(app)
 hospital = {"Authorization": f"Bearer {hospital_token}"}
