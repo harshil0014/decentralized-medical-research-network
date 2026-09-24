@@ -13,6 +13,7 @@ test -s "$TLS/server.crt"
 
 : "${MEDICAL_MASTER_KEY_HEX:?MEDICAL_MASTER_KEY_HEX must be supplied by an external secret source}"
 : "${MEDICAL_RECOVERY_BACKUP_PATH:?MEDICAL_RECOVERY_BACKUP_PATH must point to a separate backup destination}"
+: "${MEDICAL_DATA_BACKUP_DIR:?MEDICAL_DATA_BACKUP_DIR must point to a separate encrypted-object backup directory}"
 backend/.venv/bin/python - <<'PY'
 import os
 value = os.environ.get("MEDICAL_MASTER_KEY_HEX", "")
@@ -39,7 +40,9 @@ PY
 
 backend/.venv/bin/python - <<'PY'
 from backend.recovery import recovery_backup_path
+from backend.data_backup import collect_backup_manifest
 print("Recovery destination:", recovery_backup_path())
+print("Encrypted-object backups:", len(collect_backup_manifest()))
 PY
 
 backend/.venv/bin/python - <<'PY'
