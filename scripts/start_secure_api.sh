@@ -11,6 +11,18 @@ test -s "$AUTH/researcher_api.token"
 test -s "$TLS/server.key"
 test -s "$TLS/server.crt"
 
+: "${MEDICAL_MASTER_KEY_HEX:?MEDICAL_MASTER_KEY_HEX must be supplied by an external secret source}"
+backend/.venv/bin/python - <<'PY'
+import os
+value = os.environ.get("MEDICAL_MASTER_KEY_HEX", "")
+if len(value) != 64:
+    raise SystemExit("MEDICAL_MASTER_KEY_HEX must be exactly 64 hexadecimal characters")
+try:
+    bytes.fromhex(value)
+except ValueError as exc:
+    raise SystemExit("MEDICAL_MASTER_KEY_HEX must be hexadecimal") from exc
+PY
+
 test -s "ethereum/deployment.json"
 backend/.venv/bin/python - <<'PY'
 from backend.ethereum_ledger import health
