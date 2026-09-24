@@ -127,7 +127,7 @@ export MEDICAL_RECOVERY_BACKUP_PATH="/mnt/medical-recovery/medical-recovery.medr
 ./scripts/start_secure_api.sh
 ```
 
-The secure launcher and the FastAPI process force multipart/plaintext staging onto verified Linux `tmpfs`/`ramfs` storage (default `/dev/shm/medical-registry-plaintext`). The application never writes the master key to its dataset-key directory. Dataset AES keys are stored there only as AES-256-GCM-wrapped `MEDKEY01` blobs.
+The secure launcher and the FastAPI process force multipart/plaintext staging **and the entire SEAL HE job workspace** (including transient plaintext inputs and Hospital HE secret keys) onto verified Linux `tmpfs`/`ramfs` storage (default `/dev/shm/medical-registry-plaintext`). The application never writes the master key to its dataset-key directory. Dataset AES keys are stored there only as AES-256-GCM-wrapped `MEDKEY01` blobs.
 
 Open:
 
@@ -251,4 +251,4 @@ Dataset key rotation creates a new active AES key generation for future encrypte
 
 Successful dataset registration and key rotation automatically refresh an encrypted `MEDREC01` recovery bundle at `MEDICAL_RECOVERY_BACKUP_PATH`. The bundle contains the wrapped dataset-key registry and Hospital-private CID/SHA locators, is AES-GCM authenticated under a recovery key derived from the external master secret, and is bound to the current Ethereum chain ID and contract address.
 
-Hospital-only recovery endpoints support snapshot, encrypted export, and transactional restore. Restore validates bundle authentication, file hashes, chain/contract identity, dataset-key metadata and every restored private locator commitment against Ethereum. A failed verification rolls the local restore back. Keep the configured recovery path in a separate backup failure domain; software cannot protect against losing the external master secret and every copy of the recovery bundle simultaneously.
+Hospital-only recovery endpoints support snapshot, encrypted export, and transactional restore. Restore validates bundle authentication, file hashes, chain/contract identity, dataset-key metadata and every restored private locator commitment against Ethereum. A failed verification rolls the local restore back. The configured recovery path is rejected if it is inside the key directory or auth/private-locator directory. Keep it in a separate backup failure domain; software cannot protect against losing the external master secret and every copy of the recovery bundle simultaneously.
