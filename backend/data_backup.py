@@ -9,6 +9,11 @@ import subprocess
 import uuid
 from pathlib import Path
 
+from backend.ipfs_storage import (
+    add_file as ipfs_add_file,
+    has as ipfs_has,
+)
+
 
 _DATASET_ID = re.compile(r"^ds-[0-9a-f]{32}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -204,23 +209,6 @@ def collect_backup_manifest() -> dict[str, dict]:
     return result
 
 
-def _ipfs_has(cid: str) -> bool:
-    result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "medical-ipfs",
-            "ipfs",
-            "cat",
-            cid,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        timeout=180,
-    )
-    return result.returncode == 0
-
-
 def restore_missing_ipfs_objects(
     locators: dict,
     *,
@@ -250,69 +238,17 @@ def restore_missing_ipfs_objects(
                     f"Recovery bundle backup manifest mismatch for {dataset_id}"
                 )
 
-        if _ipfs_has(cid):
+        if ipfs_has(cid):
             already_present += 1
             continue
 
         object_path, _ = _paths(dataset_id)
-        container_path = f"/tmp/medical-recovery-{uuid.uuid4().hex}.medaes"
-        try:
-            copied = subprocess.run(
-                [
-                    "docker",
-                    "cp",
-                    str(object_path),
-                    f"medical-ipfs:{container_path}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=180,
+        restored_cid = ipfs_add_file(object_path)
+        if restored_cid != cid:
+            raise RuntimeError(
+                f"Restored IPFS CID mismatch for {dataset_id}"
             )
-            if copied.returncode != 0:
-                raise RuntimeError(
-                    copied.stderr.strip()
-                    or f"Failed to copy backup object for {dataset_id}"
-                )
-
-            added = subprocess.run(
-                [
-                    "docker",
-                    "exec",
-                    "medical-ipfs",
-                    "ipfs",
-                    "add",
-                    "-Q",
-                    container_path,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            if added.returncode != 0:
-                raise RuntimeError(
-                    added.stderr.strip()
-                    or f"Failed to restore IPFS object for {dataset_id}"
-                )
-
-            restored_cid = added.stdout.strip()
-            if restored_cid != cid:
-                raise RuntimeError(
-                    f"Restored IPFS CID mismatch for {dataset_id}"
-                )
-            restored += 1
-        finally:
-            subprocess.run(
-                [
-                    "docker",
-                    "exec",
-                    "medical-ipfs",
-                    "rm",
-                    "-f",
-                    container_path,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        restored += 1
 
     return {
         "restoredIpfsObjects": restored,
