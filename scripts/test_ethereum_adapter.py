@@ -13,6 +13,9 @@ import tempfile
 import time
 import uuid
 
+from eth_account import Account
+from eth_account.messages import encode_defunct
+
 root = tempfile.mkdtemp(prefix="medical-eth-adapter-")
 os.environ["MEDICAL_REGISTRY_AUTH_DIR"] = root
 os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"] = os.path.join(
@@ -31,6 +34,8 @@ suffix = str(int(time.time() * 1000))
 dataset_id = "ds-" + uuid.uuid4().hex
 request_id = "req-" + uuid.uuid4().hex
 job_id = f"PY-JOB-{suffix}"
+researcher = Account.create()
+researcher_org = f"researcher-address:{researcher.address}"
 
 state = health()
 assert state["connected"] is True
@@ -59,13 +64,23 @@ private_ds = json.loads(
 assert private_ds["cid"] == "bafy-python-adapter"
 assert private_ds["storageState"] == "PRIVATE_READY"
 
+purpose_commitment = "sha256:" + "b" * 64
+request_digest = query(
+    "ResearcherRequestDigest",
+    [request_id, dataset_id, purpose_commitment],
+    researcher_org,
+)
+request_signature = Account.sign_message(
+    encode_defunct(hexstr=request_digest),
+    researcher.key,
+).signature.hex()
 invoke(
-    "RequestAccess",
-    [request_id, dataset_id, "sha256:" + "b" * 64],
-    "org2",
+    "RequestAccessSigned",
+    [request_id, dataset_id, purpose_commitment, request_signature],
+    "org1",
 )
 invoke("DecideAccess", [request_id, "APPROVED"], "org1")
-assert query("CanAccess", [request_id], "org2") == "true"
+assert query("CanAccess", [request_id], researcher_org) == "true"
 
 invoke(
     "RegisterHEJob",
@@ -82,18 +97,23 @@ invoke(
     ],
     "org1",
 )
+compute_digest = query("HEComputeDigest", [job_id], researcher_org)
+compute_signature = Account.sign_message(
+    encode_defunct(hexstr=compute_digest),
+    researcher.key,
+).signature.hex()
 invoke(
-    "RecordHEComputation",
-    [job_id, "bafy-python-result", "c" * 64],
-    "org2",
+    "RecordHEComputationSigned",
+    [job_id, "bafy-python-result", "c" * 64, compute_signature],
+    "org1",
 )
 invoke("RecordHEDecryption", [job_id], "org1")
 
 job = json.loads(query("ReadHEJob", [job_id], "org1"))
 assert job["status"] == "DECRYPTED"
-assert len(json.loads(query("GetHEJobHistory", [job_id], "org2"))) >= 3
+assert len(json.loads(query("GetHEJobHistory", [job_id], researcher_org))) >= 3
 
 invoke("DecideAccess", [request_id, "REVOKED"], "org1")
-assert query("CanAccess", [request_id], "org2") == "false"
+assert query("CanAccess", [request_id], researcher_org) == "false"
 
 print("PYTHON ETHEREUM ADAPTER E2E: PASS")
