@@ -12,6 +12,11 @@ import uuid
 from pathlib import Path, PurePosixPath
 
 from backend.secure_temp import secure_plaintext_temp_root
+from backend.ipfs_storage import (
+    add_file as ipfs_add_file,
+    cat as ipfs_cat,
+    unpin as ipfs_unpin,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -396,35 +401,7 @@ def get_encrypted_result_sha256(
 def fetch_ipfs_dataset_bytes(
     cid: str,
 ) -> bytes:
-    if not cid or not cid.strip():
-        raise ValueError("Dataset CID is required")
-
-    result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "medical-ipfs",
-            "ipfs",
-            "cat",
-            cid,
-        ],
-        capture_output=True,
-        timeout=60,
-    )
-
-    if result.returncode != 0:
-        message = (
-            result.stderr.decode(
-                "utf-8",
-                errors="replace",
-            ).strip()
-            or "IPFS retrieval failed"
-        )
-
-        raise RuntimeError(message)
-
-    return result.stdout
-
+    return ipfs_cat(cid, timeout=180)
 
 def verify_dataset_bytes(
     data: bytes,
@@ -523,132 +500,17 @@ def extract_numeric_metric_from_csv(
 def _ipfs_add_file(
     path: Path,
 ) -> str:
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError(
-            f"IPFS source file not found: {path}"
-        )
-
-    container_path = (
-        f"/tmp/he-artifact-{uuid.uuid4().hex}"
-        f"{path.suffix}"
-    )
-
-    try:
-        copied = subprocess.run(
-            [
-                "docker",
-                "cp",
-                str(path),
-                f"medical-ipfs:{container_path}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-
-        if copied.returncode != 0:
-            raise RuntimeError(
-                copied.stderr.strip()
-                or "Failed to copy HE artifact into IPFS node"
-            )
-
-        added = subprocess.run(
-            [
-                "docker",
-                "exec",
-                "medical-ipfs",
-                "ipfs",
-                "add",
-                "-Q",
-                container_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-
-        if added.returncode != 0:
-            raise RuntimeError(
-                added.stderr.strip()
-                or "IPFS add failed"
-            )
-
-        cid = added.stdout.strip()
-
-        if not cid:
-            raise RuntimeError(
-                "IPFS returned an empty CID"
-            )
-
-        return cid
-
-    finally:
-        subprocess.run(
-            [
-                "docker",
-                "exec",
-                "medical-ipfs",
-                "rm",
-                "-f",
-                container_path,
-            ],
-            capture_output=True,
-        )
-
+    return ipfs_add_file(path)
 
 def _ipfs_cat_artifact(
     cid: str,
 ) -> bytes:
-    if not cid or not cid.strip():
-        raise ValueError("IPFS CID is required")
-
-    result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "medical-ipfs",
-            "ipfs",
-            "cat",
-            cid,
-        ],
-        capture_output=True,
-        timeout=120,
-    )
-
-    if result.returncode != 0:
-        message = (
-            result.stderr.decode(
-                "utf-8",
-                errors="replace",
-            ).strip()
-            or "IPFS artifact retrieval failed"
-        )
-
-        raise RuntimeError(message)
-
-    return result.stdout
-
+    return ipfs_cat(cid, timeout=180)
 
 def unpin_ipfs(
     cid: str,
 ) -> None:
-    if not cid:
-        return
-
-    subprocess.run(
-        [
-            "docker",
-            "exec",
-            "medical-ipfs",
-            "ipfs",
-            "pin",
-            "rm",
-            cid,
-        ],
-        capture_output=True,
-        timeout=60,
-    )
-
+    ipfs_unpin(cid)
 
 def remove_research_exchange(
     job_id: str,
