@@ -90,7 +90,7 @@ assert upload.json()["metadataSummary"].startswith("sha256:")
 assert "Synthetic glucose cohort" not in upload.json()["metadataSummary"]
 
 key_files = sorted((runtime / "keys").glob("*.key"))
-assert len(key_files) == 3
+assert len(key_files) == 2
 assert all(path.read_bytes().startswith(b"MEDKEY01") for path in key_files)
 assert all(len(path.read_bytes()) > 32 for path in key_files)
 
@@ -151,7 +151,7 @@ rotate = client.post(
 assert rotate.status_code == 200, rotate.text
 assert rotate.json()["activeKeyVersion"] == 2
 key_files = sorted((runtime / "keys").glob("*.key"))
-assert len(key_files) == 2
+assert len(key_files) == 3
 assert all(path.read_bytes().startswith(b"MEDKEY01") for path in key_files)
 assert all(len(path.read_bytes()) > 32 for path in key_files)
 
