@@ -56,6 +56,13 @@ PUBLIC_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 DATA_TYPE_PATTERN = re.compile(r"^[A-Z0-9_:-]{1,64}$")
 
 
+def _plaintext_downloads_enabled() -> bool:
+    return os.getenv(
+        "MEDICAL_ALLOW_PLAINTEXT_DOWNLOADS",
+        "",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _validate_public_id(value: str, label: str) -> str:
     clean = (value or "").strip()
     if not PUBLIC_ID_PATTERN.fullmatch(clean):
@@ -152,6 +159,7 @@ def auth_me(
         "authenticated": True,
         "role": role,
         "authMode": "service-token",
+        "plaintextDownloadsEnabled": _plaintext_downloads_enabled(),
     }
 
 
@@ -995,6 +1003,16 @@ def revoke_request(request_id: str):
 
 @app.get("/requests/{request_id}/download", dependencies=[Depends(require_researcher)])
 def download_dataset(request_id: str):
+    if not _plaintext_downloads_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Plaintext dataset downloads are disabled by default; "
+                "use the homomorphic-encryption workflow or explicitly set "
+                "MEDICAL_ALLOW_PLAINTEXT_DOWNLOADS=true for a controlled demo"
+            ),
+        )
+
     allowed = query(
         "CanAccess",
         [request_id],
