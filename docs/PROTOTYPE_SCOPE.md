@@ -19,13 +19,13 @@
 
 - synthetic or properly governed/de-identified data only
 - no HIPAA/GDPR/DPDP compliance claim
-- no full DICOM PS3.15 confidentiality-profile claim
+- PS3.15 2024b header rules are applied, but full pixel/clinical confidentiality-profile compliance is not claimed
 - no KMS/HSM
 - no per-user OIDC
 - no multi-hospital validator/consortium deployment
 - no mainnet/public-chain deployment
 - key rotation is not historical ciphertext re-encryption
-- approved raw download still exposes plaintext to the authorized researcher
+- plaintext researcher download is disabled by default; a controlled local demo can explicitly opt in
 
 ## Next production-research directions
 
@@ -33,4 +33,4 @@
 - multi-hospital/consortium governance
 - KMS/HSM-backed key hierarchy and re-encryption workflow
 - formal DICOM confidentiality-profile tooling/validation
-- policy-bound model-to-data execution that avoids raw dataset download
+- expand policy-bound compute-to-data beyond the current HE statistics
