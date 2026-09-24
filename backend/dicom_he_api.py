@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -117,7 +118,7 @@ def _require_approved_access(
 
 def _require_dicom_job(ledger: dict) -> None:
     metric = str(ledger.get("metric") or "")
-    if not metric.startswith("DICOM:"):
+    if not metric.startswith("DICOM:sha256:"):
         raise HTTPException(status_code=400, detail="HE job is not a DICOM analysis job")
 
 
@@ -134,12 +135,14 @@ def _load_private_dicom_dataset(dataset_id: str) -> tuple[dict, bytes, str, str]
     stored = fetch_ipfs_dataset_bytes(dataset["cid"])
     verified_sha256 = verify_dataset_bytes(stored, dataset["sha256"])
 
-    if is_encrypted_dataset(stored):
-        payload = decrypt_bytes(dataset_id, stored)
-        storage_encryption = "AES-256-GCM"
-    else:
-        payload = stored
-        storage_encryption = "LEGACY-PLAINTEXT"
+    if not is_encrypted_dataset(stored):
+        raise HTTPException(
+            status_code=409,
+            detail="Unencrypted legacy DICOM objects are not supported",
+        )
+
+    payload = decrypt_bytes(dataset_id, stored)
+    storage_encryption = "AES-256-GCM"
 
     return dataset, payload, storage_encryption, verified_sha256
 
@@ -246,9 +249,12 @@ def encrypt_dicom(payload: DicomHEInput):
         job_id = result["job_id"]
         ciphertext_cid = publish_dicom_ciphertext_bundle(job_id)
 
-        metric = f'DICOM:{analysis}:{metadata["scope"]}:{he_mode}'
+        metric_semantics = f'{analysis}:{metadata["scope"]}:{he_mode}'
         if metadata["scope"] == "DICOM_SEG":
-            metric += f':SEG{metadata["segment_number"]}'
+            metric_semantics += f':SEG{metadata["segment_number"]}'
+        metric = "DICOM:sha256:" + hashlib.sha256(
+            metric_semantics.encode("utf-8")
+        ).hexdigest()
         try:
             _invoke(
                 "RegisterHEJob",
