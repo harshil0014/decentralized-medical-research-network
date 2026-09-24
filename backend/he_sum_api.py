@@ -2,7 +2,12 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from backend.api_auth import require_hospital, require_researcher
+from backend.api_auth import (
+    AuthIdentity,
+    researcher_org,
+    require_hospital,
+    require_researcher,
+)
 from backend.runtime_security import require_mutation_lock
 from backend.he_service import (
     remove_research_exchange,
@@ -34,13 +39,28 @@ def _ledger_query(function: str, args: list[str], org: str):
     return json.loads(query(function, args, org))
 
 
-def _require_approved_access(dataset_id: str, request_id: str) -> None:
-    request = _ledger_query("ReadAccessRequest", [request_id], "org2")
+def _require_approved_access(
+    dataset_id: str,
+    request_id: str,
+    *,
+    actor_org: str | None = None,
+    actor_address: str | None = None,
+) -> None:
+    query_org = actor_org or "org2"
+    request = _ledger_query("ReadAccessRequest", [request_id], query_org)
 
     if request.get("datasetId") != dataset_id:
         raise HTTPException(
             status_code=403,
             detail="Access request does not belong to this dataset",
+        )
+
+    if actor_address is not None and str(
+        request.get("requesterAddress") or ""
+    ).lower() != actor_address.lower():
+        raise HTTPException(
+            status_code=403,
+            detail="Access request belongs to a different researcher identity",
         )
 
     if request.get("status") != "APPROVED":
@@ -50,7 +70,7 @@ def _require_approved_access(dataset_id: str, request_id: str) -> None:
         )
 
     from backend.app import query
-    if query("CanAccess", [request_id], "org2") != "true":
+    if query("CanAccess", [request_id], query_org) != "true":
         raise HTTPException(
             status_code=403,
             detail="Research access is no longer authorized",
@@ -60,15 +80,20 @@ def _require_approved_access(dataset_id: str, request_id: str) -> None:
 @router.post(
     "/{job_id}/compute",
     dependencies=[
-        Depends(require_researcher),
         Depends(require_mutation_lock),
     ],
 )
-def compute_sum(job_id: str):
+def compute_sum(
+    job_id: str,
+    identity: AuthIdentity = Depends(require_researcher),
+):
     result_cid = None
 
     try:
-        ledger = _ledger_query("ReadHEJob", [job_id], "org2")
+        actor_org = researcher_org(identity)
+        from backend.ethereum_ledger import account_address
+        actor_address = account_address(actor_org)
+        ledger = _ledger_query("ReadHEJob", [job_id], actor_org)
 
         if ledger.get("status") != "ENCRYPTED":
             raise HTTPException(
@@ -79,6 +104,8 @@ def compute_sum(job_id: str):
         _require_approved_access(
             ledger["datasetId"],
             ledger["requestId"],
+            actor_org=actor_org,
+            actor_address=actor_address,
         )
 
         ciphertext_cid = ledger.get("ciphertextCid")
@@ -106,7 +133,7 @@ def compute_sum(job_id: str):
             _ledger_invoke(
                 "RecordHEComputation",
                 [job_id, result_cid, result["result_sha256"]],
-                "org2",
+                actor_org,
             )
         except Exception:
             unpin_ipfs(result_cid)
@@ -114,7 +141,7 @@ def compute_sum(job_id: str):
             remove_research_exchange(job_id)
             raise
 
-        ledger = _ledger_query("ReadHEJob", [job_id], "org2")
+        ledger = _ledger_query("ReadHEJob", [job_id], actor_org)
 
         if ledger.get("resultCid") != result_cid:
             raise RuntimeError("Ethereum result CID verification failed")
