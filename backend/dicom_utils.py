@@ -3,6 +3,8 @@ import hashlib
 
 import pydicom
 from pydicom.uid import generate_uid
+from dicomanonymizer import anonymize_dataset as ps315_anonymize_dataset
+from dicomanonymizer.simpledicomanonymizer import initialize_actions_2024b
 
 
 SENSITIVE_KEYWORDS = [
@@ -76,6 +78,15 @@ def _remove_overlay_data(ds: pydicom.Dataset) -> None:
 def deidentify_dataset(ds: pydicom.Dataset, uid_map: dict[str, str] | None = None) -> None:
     _reject_visual_identity_risk(ds)
 
+    # Apply the maintained DICOM PS3.15 2024b Basic Application
+    # Confidentiality Profile header rule table first. Our stricter
+    # cleanup below is additive and deliberately removes all private tags.
+    ps315_anonymize_dataset(
+        ds,
+        delete_private_tags=True,
+        base_rules_gen=initialize_actions_2024b,
+    )
+
     def scrub_dataset(dataset: pydicom.Dataset) -> None:
         for keyword in SENSITIVE_KEYWORDS:
             if keyword in dataset:
@@ -138,8 +149,9 @@ def deidentify_dataset(ds: pydicom.Dataset, uid_map: dict[str, str] | None = Non
 
     ds.PatientIdentityRemoved = "YES"
     ds.DeidentificationMethod = (
-        "Prototype sanitization: direct identifiers/free-text/private tags/"
-        "overlays removed and identity UIDs remapped; not a full DICOM PS3.15 profile"
+        "DICOM PS3.15 2024b Basic Profile header rules; additional free-text/"
+        "private-tag/overlay cleanup; identity UIDs remapped; pixel PHI requires "
+        "separate visual safeguards"
     )
 
 
