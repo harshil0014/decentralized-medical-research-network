@@ -42,6 +42,12 @@ from backend.secure_temp import (
     create_secure_plaintext_temp,
     secure_plaintext_temp_root,
 )
+from backend.ipfs_storage import (
+    add_file as ipfs_add_file,
+    cat as ipfs_cat,
+    health as ipfs_health,
+    unpin as ipfs_unpin,
+)
 
 from backend.storage_crypto import (
     dataset_key_exists,
@@ -201,18 +207,12 @@ def invoke_private_org1(
 
 @app.get("/health")
 def health():
-    result = subprocess.run(
-        ["docker", "inspect", "-f", "{{.State.Health.Status}}", "medical-ipfs"],
-        text=True,
-        capture_output=True,
-    )
-    ipfs = result.stdout.strip() if result.returncode == 0 else "unavailable"
     chain = ethereum_health()
     return {
         "status": "ok",
         "blockchain": "ethereum",
         "ethereum": chain,
-        "ipfs": ipfs,
+        "ipfs": ipfs_health(),
     }
 
 
@@ -431,48 +431,7 @@ def upload_dataset(
             Path(encrypted_path),
         )
 
-        container_path = (
-            f"/tmp/medical-upload-{uuid.uuid4().hex}.medaes"
-        )
-
-        copied = subprocess.run(
-            [
-                "docker",
-                "cp",
-                encrypted_path,
-                f"medical-ipfs:{container_path}",
-            ],
-            text=True,
-            capture_output=True,
-        )
-
-        if copied.returncode != 0:
-            raise HTTPException(
-                status_code=502,
-                detail=copied.stderr.strip() or "Failed to copy file into IPFS node",
-            )
-
-        added = subprocess.run(
-            [
-                "docker",
-                "exec",
-                "medical-ipfs",
-                "ipfs",
-                "add",
-                "-Q",
-                container_path,
-            ],
-            text=True,
-            capture_output=True,
-        )
-
-        if added.returncode != 0:
-            raise HTTPException(
-                status_code=502,
-                detail=added.stderr.strip() or "IPFS add failed",
-            )
-
-        cid = added.stdout.strip()
+        cid = ipfs_add_file(encrypted_path)
 
         try:
             backup_encrypted_dataset(
@@ -818,19 +777,7 @@ def upload_dataset(
             and not preserve_assets
         ):
             if cid:
-                subprocess.run(
-                    [
-                        "docker",
-                        "exec",
-                        "medical-ipfs",
-                        "ipfs",
-                        "pin",
-                        "rm",
-                        cid,
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
+                ipfs_unpin(cid)
 
             if key_existed_before is False:
                 delete_dataset_key(
@@ -854,11 +801,6 @@ def upload_dataset(
             except FileNotFoundError:
                 pass
 
-        if container_path:
-            subprocess.run(
-                ["docker", "exec", "medical-ipfs", "rm", "-f", container_path],
-                capture_output=True,
-            )
 
 
 @app.get("/datasets", dependencies=[Depends(require_authenticated)])
@@ -1314,25 +1256,13 @@ def download_dataset(
 
     cid = dataset_data["cid"]
 
-    result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "medical-ipfs",
-            "ipfs",
-            "cat",
-            cid,
-        ],
-        capture_output=True,
-    )
-
-    if result.returncode != 0:
+    try:
+        stored_bytes = ipfs_cat(cid, timeout=180)
+    except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail="IPFS retrieval failed",
-        )
-
-    stored_bytes = result.stdout
+            detail="IPFS retrieval failed on every configured peer",
+        ) from exc
 
     # Ethereum ledger stores the SHA-256 of the exact object placed in IPFS.
     actual_sha256 = sha256_bytes(
