@@ -10,9 +10,8 @@ const deployment = JSON.parse(fs.readFileSync(path.join(root, "deployment.json")
 const abi = JSON.parse(fs.readFileSync(path.join(root, "build", "MedicalResearchRegistry.abi.json"), "utf8"));
 const provider = new ethers.JsonRpcProvider(deployment.rpcUrl);
 const hospital = await provider.getSigner(0);
-const researcher = await provider.getSigner(1);
+const researcher = ethers.Wallet.createRandom();
 const hospitalContract = new ethers.Contract(deployment.contractAddress, abi, hospital);
-const researcherContract = hospitalContract.connect(researcher);
 
 async function sendTx(contract, method, ...args) {
   const fn = contract.getFunction(method);
@@ -32,9 +31,7 @@ const purposeCommitment = "sha256:" + "d".repeat(64);
 const commitment = ethers.keccak256(ethers.toUtf8Bytes("bafy-demo:" + fakeSha));
 
 const hBalance = await provider.getBalance(await hospital.getAddress());
-const rBalance = await provider.getBalance(await researcher.getAddress());
 assert(hBalance > ethers.parseEther("90"));
-assert(rBalance > ethers.parseEther("90"));
 
 let semanticDatasetBlocked = false;
 try {
@@ -61,7 +58,9 @@ assert.equal(ds.storageState, "PRIVATE_READY");
 
 let unauthorized = false;
 try {
-  await sendTx(researcherContract, "updateConsent", datasetId, "REVOKED");
+  const unlockedResearcher = await provider.getSigner(1);
+  const unauthorizedContract = hospitalContract.connect(unlockedResearcher);
+  await sendTx(unauthorizedContract, "updateConsent", datasetId, "REVOKED");
 } catch (_) {
   unauthorized = true;
 }
@@ -69,19 +68,40 @@ assert.equal(unauthorized, true);
 
 let semanticRequestBlocked = false;
 try {
-  await sendTx(
-    researcherContract,
-    "requestAccess",
-    "req-alice-diabetes-study",
+  const invalidRequestId = "req-alice-diabetes-study";
+  const invalidDigest = await hospitalContract.researcherRequestDigest(
+    invalidRequestId,
     datasetId,
     purposeCommitment
+  );
+  const invalidSignature = await researcher.signMessage(ethers.getBytes(invalidDigest));
+  await sendTx(
+    hospitalContract,
+    "requestAccessBySig",
+    invalidRequestId,
+    datasetId,
+    purposeCommitment,
+    invalidSignature
   );
 } catch (_) {
   semanticRequestBlocked = true;
 }
 assert.equal(semanticRequestBlocked, true);
 
-await sendTx(researcherContract, "requestAccess", requestId, datasetId, purposeCommitment);
+const requestDigest = await hospitalContract.researcherRequestDigest(
+  requestId,
+  datasetId,
+  purposeCommitment
+);
+const requestSignature = await researcher.signMessage(ethers.getBytes(requestDigest));
+await sendTx(
+  hospitalContract,
+  "requestAccessBySig",
+  requestId,
+  datasetId,
+  purposeCommitment,
+  requestSignature
+);
 let req = await hospitalContract.getAccessRequest(requestId);
 assert.equal(req.status, "PENDING");
 
@@ -108,9 +128,18 @@ await sendTx(
 
 let job = await hospitalContract.getHEJob(jobId);
 assert.equal(job.status, "ENCRYPTED");
-assert.equal(job.researcher.toLowerCase(), (await researcher.getAddress()).toLowerCase());
+assert.equal(job.researcher.toLowerCase(), researcher.address.toLowerCase());
 
-await sendTx(researcherContract, "recordHEComputation", jobId, "bafy-result", fakeResultSha);
+const computeDigest = await hospitalContract.heComputeDigest(jobId);
+const computeSignature = await researcher.signMessage(ethers.getBytes(computeDigest));
+await sendTx(
+  hospitalContract,
+  "recordHEComputationBySig",
+  jobId,
+  "bafy-result",
+  fakeResultSha,
+  computeSignature
+);
 job = await hospitalContract.getHEJob(jobId);
 assert.equal(job.status, "COMPUTED");
 
@@ -132,12 +161,17 @@ await sendTx(
   "bafy-ciphertext-revoke",
   fakeSha
 );
+const revokedComputeDigest = await hospitalContract.heComputeDigest(revokedJobId);
+const revokedComputeSignature = await researcher.signMessage(
+  ethers.getBytes(revokedComputeDigest)
+);
 await sendTx(
-  researcherContract,
-  "recordHEComputation",
+  hospitalContract,
+  "recordHEComputationBySig",
   revokedJobId,
   "bafy-result-revoke",
-  fakeResultSha
+  fakeResultSha,
+  revokedComputeSignature
 );
 
 const dHist = await hospitalContract.getDatasetHistory(datasetId);
@@ -161,5 +195,5 @@ assert.equal(decryptAfterRevokeBlocked, true);
 await sendTx(hospitalContract, "updateConsent", datasetId, "REVOKED");
 assert.equal(await hospitalContract.canAccess(requestId), false);
 
-console.log("GANACHE ACCOUNTS: >90 test ETH each");
+console.log("EXTERNAL RESEARCHER WALLET SIGNATURES: PASS");
 console.log("SOLIDITY GOVERNANCE E2E: PASS");
