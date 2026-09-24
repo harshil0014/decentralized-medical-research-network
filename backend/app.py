@@ -77,6 +77,7 @@ tempfile.tempdir = str(_SECURE_PLAINTEXT_TMP)
 OPAQUE_DATASET_ID_PATTERN = re.compile(r"^ds-[0-9a-f]{32}$")
 OPAQUE_REQUEST_ID_PATTERN = re.compile(r"^req-[0-9a-f]{32}$")
 DATA_TYPE_PATTERN = re.compile(r"^[A-Z0-9_:-]{1,64}$")
+CSV_INPUT_TYPES = {"CSV", "LAB_CSV", "NUMERIC_CSV"}
 
 
 def _plaintext_downloads_enabled() -> bool:
@@ -315,11 +316,7 @@ def upload_dataset(
             metadata_summary = "; ".join(parts)
 
             modality = safe_metadata.get("modality")
-            data_type = (
-                f"DICOM_SERIES_{modality}"
-                if modality
-                else "DICOM_SERIES"
-            )
+            data_type = "DICOM"
 
         # DICOM files are de-identified BEFORE hashing and BEFORE IPFS storage.
         elif suffix.lower() in {".dcm", ".dicom"}:
@@ -350,8 +347,8 @@ def upload_dataset(
 
             metadata_summary = "; ".join(parts)
 
-            modality = safe_metadata.get("modality")
-            data_type = f"DICOM_{modality}" if modality else "DICOM"
+            modality = str(safe_metadata.get("modality") or "").upper()
+            data_type = "DICOM_SEG" if modality == "SEG" else "DICOM"
 
         if not data_type:
             raise HTTPException(
@@ -365,6 +362,13 @@ def upload_dataset(
                 status_code=400,
                 detail="data_type must use only A-Z, 0-9, _, : or -",
             )
+        if suffix.lower() not in {".zip", ".dcm", ".dicom"}:
+            if data_type not in CSV_INPUT_TYPES:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Non-DICOM demo uploads support CSV data only",
+                )
+            data_type = "CSV"
 
         if not metadata_summary:
             raise HTTPException(
@@ -1246,34 +1250,29 @@ def download_dataset(
             ),
         )
 
-    if is_encrypted_dataset(stored_bytes):
-        try:
-            content = decrypt_bytes(
-                dataset_data["datasetId"],
-                stored_bytes,
-            )
-        except FileNotFoundError as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Hospital dataset encryption key is unavailable"
-                ),
-            ) from exc
-        except Exception as exc:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "AES-GCM dataset authentication failed"
-                ),
-            ) from exc
+    if not is_encrypted_dataset(stored_bytes):
+        raise HTTPException(
+            status_code=409,
+            detail="Unencrypted legacy dataset objects are not supported",
+        )
 
-        storage_encryption = "AES-256-GCM"
+    try:
+        content = decrypt_bytes(
+            dataset_data["datasetId"],
+            stored_bytes,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Hospital dataset encryption key is unavailable",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="AES-GCM dataset authentication failed",
+        ) from exc
 
-    else:
-        # Backward compatibility only for datasets registered
-        # before encrypted-at-rest storage was introduced.
-        content = stored_bytes
-        storage_encryption = "LEGACY-PLAINTEXT"
+    storage_encryption = "AES-256-GCM"
 
     return Response(
         content=content,
