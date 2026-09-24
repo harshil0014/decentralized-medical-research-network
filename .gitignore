@@ -42,3 +42,9 @@ hospital_dicom/
 real_dicom/
 *.dcm
 *.dicom
+
+
+# Local authentication / recovery material
+*.token
+researchers.json
+*.medrec
