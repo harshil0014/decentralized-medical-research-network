@@ -6,6 +6,8 @@
 - AES-256-GCM encrypted-at-rest dataset storage
 - IPFS encrypted object storage
 - private local CID/SHA metadata with on-chain commitment
+- opaque server-issued dataset/request IDs enforced by Solidity
+- AES-256-GCM-wrapped dataset-key files with an externally supplied master wrapping key
 - consent/access request approve/reject/revoke
 - key-generation rotation audit
 - HTTPS localhost FastAPI with Hospital/Researcher service tokens
@@ -20,7 +22,7 @@
 - synthetic or properly governed/de-identified data only
 - no HIPAA/GDPR/DPDP compliance claim
 - PS3.15 2024b header rules are applied, but full pixel/clinical confidentiality-profile compliance is not claimed
-- no KMS/HSM
+- no production KMS/HSM integration yet; the prototype uses externally supplied master-key wrapping
 - no per-user OIDC
 - no multi-hospital validator/consortium deployment
 - no mainnet/public-chain deployment
