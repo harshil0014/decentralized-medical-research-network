@@ -44,6 +44,9 @@ os.environ["MEDICAL_REGISTRY_RUNTIME_DIR"] = str(runtime / "runtime")
 os.environ["MEDICAL_KEY_ROOT"] = str(runtime / "keys")
 os.environ["MEDICAL_MASTER_KEY_HEX"] = os.urandom(32).hex()
 os.environ["MEDICAL_PLAINTEXT_TMPDIR"] = str(plaintext_ram)
+os.environ["MEDICAL_RECOVERY_BACKUP_PATH"] = str(
+    runtime / "external-backup" / "medical-recovery.medrec"
+)
 os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"] = str(
     runtime / "private-locators.json"
 )
@@ -114,6 +117,8 @@ assert dataset_id.startswith("ds-") and len(dataset_id) == 35
 assert dataset_label not in dataset_id
 assert upload.json()["metadataSummary"].startswith("sha256:")
 assert "Synthetic glucose cohort" not in upload.json()["metadataSummary"]
+assert upload.json()["recoveryBackup"]["size"] > 0
+assert not list(plaintext_ram.glob("medical-plaintext-*"))
 
 key_files = sorted((runtime / "keys").glob("*.key"))
 assert len(key_files) == 2
@@ -182,10 +187,70 @@ rotate = client.post(
 )
 assert rotate.status_code == 200, rotate.text
 assert rotate.json()["activeKeyVersion"] == 2
+assert rotate.json()["recoveryBackup"]["size"] > 0
 key_files = sorted((runtime / "keys").glob("*.key"))
 assert len(key_files) == 3
 assert all(path.read_bytes().startswith(b"MEDKEY01") for path in key_files)
 assert all(len(path.read_bytes()) > 32 for path in key_files)
+
+# Disaster recovery: the bundle is encrypted/authenticated, survives total
+# loss of local wrapped-key files + private locators, and restores a working
+# dataset only when the bundle is intact and bound to this contract.
+recovery_path = Path(os.environ["MEDICAL_RECOVERY_BACKUP_PATH"])
+recovery_bundle = recovery_path.read_bytes()
+assert recovery_bundle.startswith(b"MEDREC01")
+assert csv_bytes not in recovery_bundle
+
+tampered = bytearray(recovery_bundle)
+tampered[-1] ^= 0x01
+tampered_restore = client.post(
+    "/admin/recovery/restore",
+    headers=hospital,
+    data={"replace_existing": "true"},
+    files={
+        "backup": (
+            "tampered.medrec",
+            io.BytesIO(bytes(tampered)),
+            "application/octet-stream",
+        )
+    },
+)
+assert tampered_restore.status_code == 400, tampered_restore.text
+
+for path in (runtime / "keys").iterdir():
+    if path.is_file():
+        path.unlink()
+locator_path = Path(os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"])
+locator_path.unlink()
+
+broken_preview = client.get(
+    f"/datasets/{dataset_id}/preview",
+    headers=hospital,
+)
+assert broken_preview.status_code != 200
+
+restored = client.post(
+    "/admin/recovery/restore",
+    headers=hospital,
+    data={"replace_existing": "true"},
+    files={
+        "backup": (
+            "medical-recovery.medrec",
+            io.BytesIO(recovery_bundle),
+            "application/octet-stream",
+        )
+    },
+)
+assert restored.status_code == 200, restored.text
+assert restored.json()["verifiedDatasets"] >= 1
+assert restored.json()["restoredKeyFiles"] >= 3
+
+restored_preview = client.get(
+    f"/datasets/{dataset_id}/preview",
+    headers=hospital,
+)
+assert restored_preview.status_code == 200, restored_preview.text
+assert "glucose_mg_dl" in restored_preview.json()["columns"]
 
 he_create = client.post(
     "/he/glucose/encrypt",
