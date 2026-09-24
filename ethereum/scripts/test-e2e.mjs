@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { ethers } from "ethers";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
@@ -21,8 +22,8 @@ async function sendTx(contract, method, ...args) {
 }
 
 const suffix = Date.now().toString(36);
-const datasetId = "SOL-E2E-" + suffix;
-const requestId = "REQ-E2E-" + suffix;
+const datasetId = "ds-" + randomBytes(16).toString("hex");
+const requestId = "req-" + randomBytes(16).toString("hex");
 const jobId = "JOB-E2E-" + suffix;
 const fakeSha = "a".repeat(64);
 const fakeResultSha = "b".repeat(64);
@@ -34,6 +35,21 @@ const hBalance = await provider.getBalance(await hospital.getAddress());
 const rBalance = await provider.getBalance(await researcher.getAddress());
 assert(hBalance > ethers.parseEther("90"));
 assert(rBalance > ethers.parseEther("90"));
+
+let semanticDatasetBlocked = false;
+try {
+  await sendTx(
+    hospitalContract,
+    "registerDataset",
+    "patient-alice-diabetes",
+    "LAB_CSV",
+    metadataCommitment,
+    "ACTIVE"
+  );
+} catch (_) {
+  semanticDatasetBlocked = true;
+}
+assert.equal(semanticDatasetBlocked, true);
 
 await sendTx(hospitalContract, "registerDataset", datasetId, "LAB_CSV", metadataCommitment, "ACTIVE");
 let ds = await hospitalContract.getDataset(datasetId);
@@ -50,6 +66,20 @@ try {
   unauthorized = true;
 }
 assert.equal(unauthorized, true);
+
+let semanticRequestBlocked = false;
+try {
+  await sendTx(
+    researcherContract,
+    "requestAccess",
+    "req-alice-diabetes-study",
+    datasetId,
+    purposeCommitment
+  );
+} catch (_) {
+  semanticRequestBlocked = true;
+}
+assert.equal(semanticRequestBlocked, true);
 
 await sendTx(researcherContract, "requestAccess", requestId, datasetId, purposeCommitment);
 let req = await hospitalContract.getAccessRequest(requestId);
