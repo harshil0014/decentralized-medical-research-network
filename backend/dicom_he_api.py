@@ -83,14 +83,28 @@ def _query(function: str, args: list[str], org: str):
     return json.loads(query(function, args, org))
 
 
-def _require_approved_access(dataset_id: str, request_id: str) -> dict:
-    request = _query("ReadAccessRequest", [request_id], "org2")
+def _require_approved_access(
+    dataset_id: str,
+    request_id: str,
+    *,
+    actor_org: str | None = None,
+    actor_address: str | None = None,
+) -> dict:
+    query_org = actor_org or "org2"
+    request = _query("ReadAccessRequest", [request_id], query_org)
     if request.get("datasetId") != dataset_id:
         raise HTTPException(status_code=403, detail="Access request does not belong to this dataset")
+    if actor_address is not None and str(
+        request.get("requesterAddress") or ""
+    ).lower() != actor_address.lower():
+        raise HTTPException(
+            status_code=403,
+            detail="Access request belongs to a different researcher identity",
+        )
     if request.get("status") != "APPROVED":
         raise HTTPException(status_code=403, detail="Research access is not approved")
     from backend.app import query
-    if query("CanAccess", [request_id], "org2") != "true":
+    if query("CanAccess", [request_id], query_org) != "true":
         raise HTTPException(status_code=403, detail="Research access is no longer authorized")
     return request
 
@@ -326,20 +340,33 @@ def inspect_dicom_seg(dataset_id: str):
         ) from exc
 
 
-@router.post("/{job_id}/compute", dependencies=[Depends(require_researcher), Depends(require_mutation_lock)])
-def compute_dicom(job_id: str):
+@router.post("/{job_id}/compute", dependencies=[Depends(require_mutation_lock)])
+def compute_dicom(
+    job_id: str,
+    identity: AuthIdentity = Depends(require_researcher),
+):
     result_cid = None
     try:
-        ledger = _query("ReadHEJob", [job_id], "org2")
+        actor_org = researcher_org(identity)
+        from backend.ethereum_ledger import account_address
+        actor_address = account_address(actor_org)
+        ledger = _query("ReadHEJob", [job_id], actor_org)
         _require_dicom_job(ledger)
         if ledger.get("status") != "ENCRYPTED":
             raise HTTPException(status_code=409, detail="DICOM HE job is not in ENCRYPTED state")
 
-        _require_approved_access(ledger["datasetId"], ledger["requestId"])
+        _require_approved_access(
+            ledger["datasetId"],
+            ledger["requestId"],
+            actor_org=actor_org,
+            actor_address=actor_address,
+        )
         if ledger.get("secondaryRequestId"):
             _require_approved_access(
                 ledger["secondaryDatasetId"],
                 ledger["secondaryRequestId"],
+                actor_org=actor_org,
+                actor_address=actor_address,
             )
 
         restore_dicom_ciphertext_bundle(
@@ -359,7 +386,7 @@ def compute_dicom(job_id: str):
             _invoke(
                 "RecordHEComputation",
                 [job_id, result_cid, result["result_sha256"]],
-                "org2",
+                actor_org,
             )
         except Exception:
             unpin_ipfs(result_cid)
@@ -367,7 +394,7 @@ def compute_dicom(job_id: str):
             remove_dicom_research_exchange(job_id)
             raise
 
-        ledger = _query("ReadHEJob", [job_id], "org2")
+        ledger = _query("ReadHEJob", [job_id], actor_org)
         if ledger.get("resultCid") != result_cid:
             raise RuntimeError("Ethereum DICOM result CID verification failed")
 
