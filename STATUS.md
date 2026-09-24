@@ -8,6 +8,6 @@ Medical data is stored only as AES-256-GCM MEDAES ciphertext in IPFS. Ethereum s
 
 Recovery uses a chain-bound authenticated bundle for wrapped AES keys, private CID/SHA locators and the encrypted-object backup manifest. MEDAES object backups live in a separate configured directory. Restore verifies object SHA, CID and ledger commitment and republishes missing ciphertext to the replicated IPFS layer.
 
-`scripts/setup_decentralized_demo.sh` starts or restarts the demo network. `scripts/status_decentralized_demo.sh` verifies node identities and shared state; `scripts/test_decentralized_topology.py` additionally tests one-validator and primary-IPFS outages. `scripts/stop_decentralized_demo.sh` stops containers while retaining mounted node data.
+`scripts/setup_decentralized_demo.sh` starts or restarts the demo network. `scripts/status_decentralized_demo.sh` verifies node identities and shared state; `scripts/test_decentralized_topology.py` tests validator and IPFS outages plus full stop/restart persistence. `scripts/stop_decentralized_demo.sh` stops containers while retaining mounted node data.
 
 This is a controlled research prototype, not a clinical compliance or production key-management system. Only synthetic or properly de-identified data should be used.

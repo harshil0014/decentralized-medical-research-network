@@ -303,7 +303,7 @@ def decrypt_average(
 
     match = re.search(
         r"Decrypted result:\s*"
-        r"([-+]?[0-9]+(?:\.[0-9]+)?)",
+        r"([-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)",
         output,
     )
 
@@ -315,6 +315,8 @@ def decrypt_average(
     average = float(
         match.group(1)
     )
+    if not math.isfinite(average):
+        raise RuntimeError("CKKS average is not finite")
 
     return {
         "job_id": job_id,
@@ -322,6 +324,8 @@ def decrypt_average(
         "metric": "fasting_glucose",
         "unit": "mg/dL",
         "average": average,
+        "ckks_approximate": True,
+        "accuracy_note": "Approximate CKKS result; no fixed error bound",
     }
 
 
@@ -709,7 +713,7 @@ def restore_ciphertext_bundle_from_ipfs(
             != expected_manifest_sha256.lower()
         ):
             raise RuntimeError(
-                "Ciphertext manifest does not match Fabric"
+                "Ciphertext manifest does not match Ethereum commitment"
             )
 
         return actual_manifest
@@ -775,7 +779,7 @@ def restore_encrypted_result_from_ipfs(
         != expected_sha256.lower()
     ):
         raise RuntimeError(
-            "Encrypted result SHA256 does not match Fabric"
+            "Encrypted result SHA256 does not match Ethereum commitment"
         )
 
     result = (

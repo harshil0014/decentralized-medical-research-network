@@ -13,7 +13,7 @@ The active governance layer is:
 
 Ganache is retained only for the faster compatibility/E2E test environment.
 
-Hyperledger Fabric is not used by the active runtime. Historical Fabric-era source remains only for migration/reference and must not be treated as an active security boundary.
+Hyperledger Fabric is not used by the active runtime. Historical Fabric source and scripts are quarantined under `archive/fabric/` for reference only.
 
 ## System flow
 
@@ -68,7 +68,7 @@ Install Python dependencies:
 ```bash
 python3 -m venv backend/.venv
 source backend/.venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.lock
 ```
 
 Start the four-validator Besu QBFT network and three IPFS peers, compile and deploy the contract, and run its E2E test:
@@ -254,6 +254,16 @@ Dataset AES keys are not stored as raw 32-byte files. Each key generation is wra
 ## Key rotation semantics
 
 Dataset key rotation creates a new active AES key generation for future encrypted objects while retaining historical generations as DECRYPT_ONLY so existing immutable IPFS ciphertext remains readable. It is **version rotation**, not retroactive re-encryption. If an old key is suspected compromised, the affected ciphertext must be re-encrypted and republished under a new dataset/version; rotating metadata alone does not remediate historical ciphertext.
+
+## DICOM analysis semantics
+
+Classic CT/MR slices are ordered by their patient-space plane normal. Inconsistent orientation or overlapping planes are rejected. Physical voxel volume is reported only when slice positions prove regular spacing; `TOTAL_ENERGY` requires that spacing. SEG analysis requires matching source references, frame of reference, orientation, matrix geometry and complete plane coverage. Independently uploaded source and SEG objects use the Hospital master key to create consistent pseudonymous UIDs.
+
+`RAW_VOXELS` encrypts selected voxel values before researcher computation. It streams CKKS ciphertext chunks and checks free RAM-backed workspace capacity before encryption. `BLOCK_STATS` has the Hospital compute plaintext sums and squared sums, then encrypts those sufficient statistics; higher moments require `RAW_VOXELS`. Both modes return approximate CKKS results without a fixed error guarantee. Pixel identifiers are addressed by explicit Hospital visual review, separate from automated DICOM header de-identification. No automated pixel-PHI detector is claimed.
+
+Dataset browsing and history endpoints support `offset` and `limit` query parameters (maximum 100 records). `/health` returns only service liveness; detailed network diagnostics require Hospital authentication at `/admin/diagnostics`. Researcher service credentials can be disabled in `researchers.json` with `"enabled": false` or revoked by removing the token file. Browser credentials use session storage for this localhost demo and logout clears that storage.
+
+`requirements.lock` records the tested Python dependency versions used in CI and fresh setup. Intentional dependency updates should start from `requirements.txt`, regenerate the lock with `python -m pip freeze`, and rerun both CI jobs. Microsoft SEAL and demo container images are pinned to tested revisions; compiler warnings inside bundled SEAL/zstd are upstream warnings.
 
 
 ## Disaster recovery

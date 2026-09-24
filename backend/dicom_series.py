@@ -6,7 +6,7 @@ import tempfile
 import pydicom
 
 from backend.dicom_utils import deidentify_dataset
-from backend.secure_temp import secure_plaintext_temp_root
+from backend.secure_temp import require_staging_capacity, secure_plaintext_temp_root
 
 
 MAX_SERIES_FILES = 5000
@@ -41,6 +41,7 @@ def deidentify_dicom_series_zip(
             total_size = sum(item.file_size for item in files)
             if total_size > MAX_SERIES_BYTES:
                 raise ValueError("DICOM ZIP is too large")
+            require_staging_capacity(total_size * 3 + path.stat().st_size)
 
             for index, member in enumerate(files, start=1):
                 name = Path(member.filename)

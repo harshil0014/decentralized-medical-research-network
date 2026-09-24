@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, File, Form
+from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, File, Form, Query
 from pydantic import BaseModel
 
 from backend.api_auth import (
@@ -39,6 +39,7 @@ from backend.recovery import (
 
 from backend.secure_temp import (
     create_secure_plaintext_temp,
+    require_staging_capacity,
     secure_plaintext_temp_root,
 )
 from backend.ipfs_storage import (
@@ -159,7 +160,7 @@ def _public_request_record(raw: str):
     if record.get("decidedByAddress"):
         record["decidedByRole"] = "Hospital"
         record.pop("decidedBy", None)
-    elif record.get("decidedBy") == "Org1MSP":
+    elif record.get("decidedBy") == "Hospital":
         record["decidedByRole"] = "Hospital"
         record.pop("decidedBy", None)
     return record
@@ -192,6 +193,11 @@ def invoke_private_org1(
 
 @app.get("/health")
 def health():
+    return {"status": "ok"}
+
+
+@app.get("/admin/diagnostics", dependencies=[Depends(require_hospital)])
+def hospital_diagnostics():
     chain = ethereum_health()
     return {
         "status": "ok",
@@ -238,7 +244,7 @@ def upload_dataset(
     # Registration is now a three-stage Ethereum transaction:
     #
     # 1. public PRIVATE_PENDING record
-    # 2. Org1-only transient CID/SHA -> implicit private collection
+    # 2. Hospital private CID/SHA locator
     # 3. public PRIVATE_READY finalization
     #
     # Once stage 1 has definitely committed, local encrypted
@@ -273,6 +279,14 @@ def upload_dataset(
             )
 
         suffix = Path(file.filename or "upload.bin").suffix
+
+        file.file.seek(0, os.SEEK_END)
+        upload_size = file.file.tell()
+        file.file.seek(0)
+        try:
+            require_staging_capacity(upload_size * 4 + 8 * 1024 * 1024)
+        except ValueError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
 
         # Medical plaintext never stages on the ordinary filesystem.
         # This path is verified to be RAM-backed (tmpfs/ramfs).
@@ -501,7 +515,7 @@ def upload_dataset(
 
             if (
                 pending.get("datasetId") != dataset_id
-                or pending.get("ownerOrg") != "Org1MSP"
+                or pending.get("ownerOrg") != "Hospital"
                 or pending.get("storageState")
                 != "PRIVATE_PENDING"
             ):
@@ -526,7 +540,7 @@ def upload_dataset(
 
         # ====================================================
         # STAGE 2
-        # CID/SHA go only through transient data to Org1's
+        # CID/SHA remain in the Hospital private locator store
         # implicit private collection.
         # ====================================================
 
@@ -789,8 +803,8 @@ def upload_dataset(
 
 
 @app.get("/datasets", dependencies=[Depends(require_authenticated)])
-def list_datasets():
-    raw = query("GetAllDatasets", [], "org2")
+def list_datasets(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)):
+    raw = query("GetAllDatasets", [str(offset), str(limit)], "org2")
     records = json.loads(raw)
 
     # Researcher-facing discovery metadata only.
@@ -813,9 +827,14 @@ def list_datasets():
     ]
 
 
+@app.get("/datasets/count", dependencies=[Depends(require_authenticated)])
+def dataset_count():
+    return {"count": int(query("DatasetCount", [], "org2"))}
+
+
 @app.get("/datasets/{dataset_id}/history", dependencies=[Depends(require_authenticated)])
-def get_dataset_history(dataset_id: str):
-    raw = query("GetDatasetHistory", [dataset_id], "org2")
+def get_dataset_history(dataset_id: str, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)):
+    raw = query("GetDatasetHistory", [dataset_id, str(offset), str(limit)], "org2")
     history = json.loads(raw)
 
     safe_history = []
@@ -875,7 +894,7 @@ def rotate_dataset_encryption_key(
 
     if dataset.get(
         "ownerOrg"
-    ) != "Org1MSP":
+    ) != "Hospital":
         raise HTTPException(
             status_code=403,
             detail=(
@@ -1027,7 +1046,7 @@ def create_recovery_snapshot():
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Recovery snapshot failed: {exc}",
+            detail="Recovery snapshot failed; check Hospital diagnostics",
         ) from exc
 
 
@@ -1038,7 +1057,7 @@ def export_recovery_snapshot():
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Recovery export failed: {exc}",
+            detail="Recovery export failed; check Hospital diagnostics",
         ) from exc
 
     return Response(
@@ -1081,7 +1100,7 @@ def restore_recovery_snapshot(
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Recovery restore failed: {exc}",
+            detail="Recovery restore failed; verify backup and deployment state",
         ) from exc
 
 

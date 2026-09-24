@@ -25,6 +25,7 @@ from backend.he_service import (
     _ipfs_cat_artifact,
 )
 from backend.secure_temp import secure_plaintext_temp_root
+from backend.secure_temp import require_staging_capacity
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -66,7 +67,7 @@ SUPPORTED_HE_MODES = {"RAW_VOXELS", "BLOCK_STATS"}
 MAX_DICOM_FILES = 5000
 MAX_UNCOMPRESSED_ZIP = 2 * 1024 * 1024 * 1024
 MAX_VOXELS = 150_000_000
-MAX_RAW_VOXELS = 262_144
+MAX_RAW_VOXELS = MAX_VOXELS
 MAX_STAT_BLOCKS = 2048
 
 
@@ -210,129 +211,111 @@ def _validate_dicom_series(
     return modality
 
 
-def _dataset_sort_key(ds: pydicom.Dataset) -> tuple[float, float]:
-    position = getattr(ds, "ImagePositionPatient", None)
-    if position and len(position) >= 3:
-        try:
-            return (0.0, float(position[2]))
-        except (TypeError, ValueError):
-            pass
+def _ordered_slices(datasets: list[pydicom.Dataset]) -> list[pydicom.Dataset]:
+    """Order classic slices along their shared patient-space plane normal."""
+    if len(datasets) < 2:
+        return list(datasets)
 
-    try:
-        return (1.0, float(getattr(ds, "InstanceNumber", 0)))
-    except (TypeError, ValueError):
-        return (1.0, 0.0)
+    has_geometry = [
+        getattr(ds, "ImagePositionPatient", None) is not None
+        or getattr(ds, "ImageOrientationPatient", None) is not None
+        for ds in datasets
+    ]
+    if not any(has_geometry):
+        # Legacy classic images without any geometry can only be ordered by
+        # explicit, unique instance numbers. This does not imply spatial volume.
+        try:
+            numbered = [(int(ds.InstanceNumber), ds) for ds in datasets]
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("DICOM slices lack geometry and unique InstanceNumber") from exc
+        if len({number for number, _ in numbered}) != len(numbered):
+            raise ValueError("DICOM slices lack geometry and unique InstanceNumber")
+        return [ds for _, ds in sorted(numbered, key=lambda item: item[0])]
+    if not all(has_geometry):
+        raise ValueError("DICOM series has incomplete slice geometry")
+
+    reference_normal = None
+    reference_orientation = None
+    reference_spacing = None
+    reference_frame = None
+    entries = []
+    for ds in datasets:
+        try:
+            orientation = np.asarray(ds.ImageOrientationPatient, dtype=np.float64)
+            position = np.asarray(ds.ImagePositionPatient, dtype=np.float64)
+            spacing = np.asarray(ds.PixelSpacing, dtype=np.float64)
+            if orientation.shape != (6,) or position.shape != (3,) or spacing.shape != (2,):
+                raise ValueError()
+            if not np.isfinite(orientation).all() or not np.isfinite(position).all():
+                raise ValueError()
+            if not np.isfinite(spacing).all() or np.any(spacing <= 0):
+                raise ValueError()
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("DICOM series has incomplete slice geometry") from exc
+        row, column = orientation[:3], orientation[3:]
+        if (abs(np.linalg.norm(row) - 1) > 1e-3
+                or abs(np.linalg.norm(column) - 1) > 1e-3
+                or abs(np.dot(row, column)) > 1e-3):
+            raise ValueError("DICOM slice orientation is invalid")
+        normal = np.cross(row, column)
+        frame = str(getattr(ds, "FrameOfReferenceUID", ""))
+        if reference_normal is None:
+            reference_normal = normal
+            reference_orientation = orientation
+            reference_spacing = spacing
+            reference_frame = frame
+        elif (not np.allclose(orientation, reference_orientation, atol=1e-3, rtol=0)
+              or not np.allclose(spacing, reference_spacing, atol=1e-3, rtol=0)
+              or frame != reference_frame):
+            raise ValueError("DICOM slices have inconsistent orientation, spacing or frame")
+        entries.append((float(np.dot(position, reference_normal)), position, ds))
+
+    entries.sort(key=lambda item: item[0])
+    coordinates = [entry[0] for entry in entries]
+    if any(b - a <= 1e-3 for a, b in zip(coordinates, coordinates[1:])):
+        raise ValueError("DICOM slices have duplicate or overlapping planes")
+    anchor = entries[0][1]
+    for coordinate, position, _ in entries:
+        residual = position - anchor - (coordinate - coordinates[0]) * reference_normal
+        if np.linalg.norm(residual) > 1e-2:
+            raise ValueError("DICOM slice positions shift within the image plane")
+    return [entry[2] for entry in entries]
 
 
 def _voxel_spacing_mm(
     datasets: list[pydicom.Dataset],
-) -> tuple[float, float, float]:
-    ordered = sorted(datasets, key=_dataset_sort_key)
+) -> tuple[float, float, float] | None:
+    ordered = _ordered_slices(datasets)
     first = ordered[0]
-
-    row_spacing = 1.0
-    col_spacing = 1.0
-    pixel_spacing = getattr(first, "PixelSpacing", None)
-    if pixel_spacing and len(pixel_spacing) >= 2:
-        try:
-            row_spacing = abs(float(pixel_spacing[0]))
-            col_spacing = abs(float(pixel_spacing[1]))
-        except (TypeError, ValueError):
-            row_spacing = 1.0
-            col_spacing = 1.0
-
-    slice_spacing: float | None = None
-    if len(ordered) > 1:
-        positions: list[np.ndarray] = []
-        for ds in ordered:
-            position = getattr(ds, "ImagePositionPatient", None)
-            if not position or len(position) < 3:
-                positions = []
-                break
-            try:
-                positions.append(
-                    np.asarray(
-                        [float(position[0]), float(position[1]), float(position[2])],
-                        dtype=np.float64,
-                    )
-                )
-            except (TypeError, ValueError):
-                positions = []
-                break
-
-        if len(positions) >= 2:
-            orientation = getattr(first, "ImageOrientationPatient", None)
-            projected: list[float]
-            if orientation and len(orientation) >= 6:
-                try:
-                    row_direction = np.asarray(
-                        [float(x) for x in orientation[:3]],
-                        dtype=np.float64,
-                    )
-                    column_direction = np.asarray(
-                        [float(x) for x in orientation[3:6]],
-                        dtype=np.float64,
-                    )
-                    normal = np.cross(row_direction, column_direction)
-                    norm = float(np.linalg.norm(normal))
-                    if norm > 0:
-                        normal /= norm
-                        projected = [
-                            float(np.dot(position, normal))
-                            for position in positions
-                        ]
-                    else:
-                        projected = [
-                            float(np.linalg.norm(position - positions[0]))
-                            for position in positions
-                        ]
-                except (TypeError, ValueError):
-                    projected = [
-                        float(np.linalg.norm(position - positions[0]))
-                        for position in positions
-                    ]
-            else:
-                projected = [
-                    float(np.linalg.norm(position - positions[0]))
-                    for position in positions
-                ]
-
-            projected = sorted(projected)
-            diffs = [
-                abs(projected[index + 1] - projected[index])
-                for index in range(len(projected) - 1)
-                if abs(projected[index + 1] - projected[index]) > 1e-9
-            ]
-            if diffs:
-                slice_spacing = float(np.median(diffs))
-
-    if slice_spacing is None:
-        for keyword in ("SpacingBetweenSlices", "SliceThickness"):
-            value = getattr(first, keyword, None)
-            if value not in (None, ""):
-                try:
-                    candidate = abs(float(value))
-                except (TypeError, ValueError):
-                    continue
-                if candidate > 0:
-                    slice_spacing = candidate
-                    break
-
-    if slice_spacing is None or slice_spacing <= 0:
-        slice_spacing = 1.0
-
-    if row_spacing <= 0:
-        row_spacing = 1.0
-    if col_spacing <= 0:
-        col_spacing = 1.0
-
-    return (slice_spacing, row_spacing, col_spacing)
+    try:
+        row_spacing, col_spacing = [float(x) for x in first.PixelSpacing]
+        if not (math.isfinite(row_spacing) and math.isfinite(col_spacing)):
+            return None
+        if row_spacing <= 0 or col_spacing <= 0:
+            return None
+        if len(ordered) > 1:
+            normal = np.cross(
+                np.asarray(first.ImageOrientationPatient[:3], dtype=np.float64),
+                np.asarray(first.ImageOrientationPatient[3:], dtype=np.float64),
+            )
+            projected = [float(np.dot(np.asarray(ds.ImagePositionPatient, dtype=np.float64), normal)) for ds in ordered]
+            diffs = np.diff(projected)
+            spacing = float(np.median(diffs))
+            if not np.allclose(diffs, spacing, rtol=0.01, atol=0.01):
+                return None
+        else:
+            spacing = float(getattr(first, "SpacingBetweenSlices", None) or getattr(first, "SliceThickness", 0))
+        if not math.isfinite(spacing) or spacing <= 0:
+            return None
+        return spacing, row_spacing, col_spacing
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _fallback_volume(
     datasets: list[pydicom.Dataset],
 ) -> np.ndarray:
-    ordered = sorted(datasets, key=_dataset_sort_key)
+    ordered = _ordered_slices(datasets)
 
     if len(ordered) == 1:
         ds = ordered[0]
@@ -393,20 +376,8 @@ def _fallback_volume(
 def _build_volume(
     datasets: list[pydicom.Dataset],
 ) -> tuple[np.ndarray, str]:
-    if hd is not None and len(datasets) > 1:
-        try:
-            volume = hd.get_volume_from_series(
-                datasets,
-                dtype=np.float64,
-                apply_modality_transform=None,
-                apply_voi_transform=False,
-            )
-            return np.asarray(volume.array, dtype=np.float64), "highdicom"
-        except Exception:
-            # Real-world exports may omit geometry required by highdicom.
-            # The deterministic pydicom fallback still handles classic series.
-            pass
-
+    # Classic series retain one explicit normal-projection ordering, including
+    # when highdicom is installed. SEG alignment uses highdicom separately.
     return _fallback_volume(datasets), "pydicom"
 
 
@@ -489,6 +460,7 @@ def extract_dicom_seg_analysis_values(
 
     source_datasets = _read_dicom_datasets(source_data)
     modality = _validate_dicom_series(source_datasets)
+    source_datasets = _ordered_slices(source_datasets)
 
     try:
         source_volume = hd.get_volume_from_series(
@@ -512,6 +484,45 @@ def extract_dicom_seg_analysis_values(
         raise ValueError(f"DICOM volume exceeds {MAX_VOXELS:,} voxels")
 
     segmentation = _read_single_segmentation(segmentation_data)
+    source_frame = str(getattr(source_datasets[0], "FrameOfReferenceUID", ""))
+    if not source_frame or str(getattr(segmentation, "FrameOfReferenceUID", "")) != source_frame:
+        raise ValueError("DICOM SEG frame of reference does not match source")
+    source_series = str(getattr(source_datasets[0], "SeriesInstanceUID", ""))
+    source_sops = {str(ds.SOPInstanceUID) for ds in source_datasets}
+    references = getattr(segmentation, "ReferencedSeriesSequence", [])
+    if len(references) != 1 or str(getattr(references[0], "SeriesInstanceUID", "")) != source_series:
+        raise ValueError("DICOM SEG references the wrong source series")
+    referenced_sops = {
+        str(getattr(item, "ReferencedSOPInstanceUID", ""))
+        for item in getattr(references[0], "ReferencedInstanceSequence", [])
+    }
+    if referenced_sops != source_sops:
+        raise ValueError("DICOM SEG source image references are incomplete or mismatched")
+
+    try:
+        source_positions = [np.asarray(ds.ImagePositionPatient, dtype=np.float64) for ds in source_datasets]
+        source_orientation = np.asarray(source_datasets[0].ImageOrientationPatient, dtype=np.float64)
+        source_spacing = np.asarray(source_datasets[0].PixelSpacing, dtype=np.float64)
+        shared = segmentation.SharedFunctionalGroupsSequence[0]
+        seg_orientation = np.asarray(shared.PlaneOrientationSequence[0].ImageOrientationPatient, dtype=np.float64)
+        seg_spacing = np.asarray(shared.PixelMeasuresSequence[0].PixelSpacing, dtype=np.float64)
+        frame_positions = [
+            np.asarray(frame.PlanePositionSequence[0].ImagePositionPatient, dtype=np.float64)
+            for frame in segmentation.PerFrameFunctionalGroupsSequence
+        ]
+    except (AttributeError, IndexError, TypeError, ValueError) as exc:
+        raise ValueError("DICOM SEG lacks required frame position or orientation") from exc
+    if (segmentation.Rows != source_datasets[0].Rows
+            or segmentation.Columns != source_datasets[0].Columns
+            or not np.allclose(seg_orientation, source_orientation, atol=1e-3, rtol=0)
+            or not np.allclose(seg_spacing, source_spacing, atol=1e-3, rtol=0)):
+        raise ValueError("DICOM SEG orientation or matrix geometry does not match source")
+    if len(frame_positions) != len(source_positions) or not all(
+        np.allclose(frame, source, atol=1e-2, rtol=0)
+        for frame, source in zip(sorted(frame_positions, key=lambda x: tuple(x)),
+                                 sorted(source_positions, key=lambda x: tuple(x)))
+    ):
+        raise ValueError("DICOM SEG frame positions do not cover source planes exactly")
     available = [int(value) for value in segmentation.segment_numbers]
     requested = int(segment_number)
     if requested not in available:
@@ -526,7 +537,7 @@ def extract_dicom_seg_analysis_values(
             combine_segments=True,
             relabel=False,
             dtype=np.uint8,
-            allow_missing_positions=True,
+            allow_missing_positions=False,
         )
         aligned_segment = segment_volume.match_geometry(source_volume)
     except Exception as exc:
@@ -549,7 +560,7 @@ def extract_dicom_seg_analysis_values(
     )
     unit = "HU" if modality == "CT" else "relative_intensity"
     voxel_spacing_mm = _voxel_spacing_mm(source_datasets)
-    voxel_volume_mm3 = float(np.prod(voxel_spacing_mm))
+    voxel_volume_mm3 = float(np.prod(voxel_spacing_mm)) if voxel_spacing_mm else None
 
     metadata = {
         "modality": modality,
@@ -566,9 +577,10 @@ def extract_dicom_seg_analysis_values(
         "segment_label": label,
         "segment_voxel_count": voxel_count,
         "segment_mask_shape": [int(x) for x in mask.shape],
-        "voxel_spacing_mm": [float(x) for x in voxel_spacing_mm],
+        "voxel_spacing_mm": list(voxel_spacing_mm) if voxel_spacing_mm else None,
         "voxel_volume_mm3": voxel_volume_mm3,
-        "segment_physical_volume_mm3": float(voxel_count) * voxel_volume_mm3,
+        "physical_volume_valid": voxel_volume_mm3 is not None,
+        "segment_physical_volume_mm3": float(voxel_count) * voxel_volume_mm3 if voxel_volume_mm3 is not None else None,
         "segment_property_category": _segment_code_meaning(
             description,
             "SegmentedPropertyCategoryCodeSequence",
@@ -674,7 +686,7 @@ def extract_dicom_analysis_values(
 
     unit = "HU" if modality == "CT" else "relative_intensity"
     voxel_spacing_mm = _voxel_spacing_mm(datasets)
-    voxel_volume_mm3 = float(np.prod(voxel_spacing_mm))
+    voxel_volume_mm3 = float(np.prod(voxel_spacing_mm)) if voxel_spacing_mm else None
 
     metadata = {
         "modality": modality,
@@ -685,8 +697,9 @@ def extract_dicom_analysis_values(
         "original_shape": list(original_shape),
         "selected_shape": [int(x) for x in selected.shape],
         "voxel_count": int(selected.size),
-        "voxel_spacing_mm": [float(x) for x in voxel_spacing_mm],
+        "voxel_spacing_mm": list(voxel_spacing_mm) if voxel_spacing_mm else None,
         "voxel_volume_mm3": voxel_volume_mm3,
+        "physical_volume_valid": voxel_volume_mm3 is not None,
         "dicom_loader": loader,
     }
 
@@ -747,9 +760,13 @@ def build_raw_voxel_input(
         raise ValueError("At least two DICOM values are required")
     if flat.size > MAX_RAW_VOXELS:
         raise ValueError(
-            f"RAW_VOXELS supports at most {MAX_RAW_VOXELS:,} selected voxels; "
-            "use SLICE/ROI_BOX or BLOCK_STATS for larger volumes"
+            f"DICOM analysis supports at most {MAX_RAW_VOXELS:,} selected voxels"
         )
+    # Each 4096-slot CKKS ciphertext and its temporary evaluation state can
+    # consume substantially more space than the input doubles. Reject early
+    # using a conservative per-chunk reservation rather than a voxel ceiling.
+    chunks = math.ceil(flat.size / 4096)
+    require_staging_capacity(chunks * 1024 * 1024 + flat.nbytes * 2)
     if not np.isfinite(flat).all():
         raise ValueError("DICOM values contain non-finite numbers")
 
@@ -828,6 +845,9 @@ def create_encrypted_dicom_job(
             + " requires RAW_VOXELS so higher moments are computed "
               "by the researcher over encrypted voxels"
         )
+
+    if normalized_analysis == "TOTAL_ENERGY" and not metadata.get("physical_volume_valid", metadata.get("voxel_volume_mm3") is not None):
+        raise ValueError("TOTAL_ENERGY requires proven regular physical voxel spacing")
 
     job_id = uuid.uuid4().hex
     job = _job_dir(job_id)
@@ -914,6 +934,9 @@ def create_encrypted_dicom_job(
             "researcher_has_encrypted_raw_voxels": (
                 normalized_mode == "RAW_VOXELS"
             ),
+            "hospital_computed_plaintext_sufficient_statistics": (
+                normalized_mode == "BLOCK_STATS"
+            ),
             "researcher_has_secret_key": False,
         }
     )
@@ -956,6 +979,9 @@ def create_encrypted_dicom_job(
         "researcher_has_raw_pixels": False,
         "researcher_has_encrypted_raw_voxels": (
             normalized_mode == "RAW_VOXELS"
+        ),
+        "hospital_computed_plaintext_sufficient_statistics": (
+            normalized_mode == "BLOCK_STATS"
         ),
         "researcher_has_secret_key": False,
         **metadata,
@@ -1011,6 +1037,9 @@ def compute_encrypted_dicom_analysis(job_id: str) -> dict:
         "researcher_has_raw_pixels": False,
         "researcher_has_encrypted_raw_voxels": bool(
             metadata.get("researcher_has_encrypted_raw_voxels", False)
+        ),
+        "hospital_computed_plaintext_sufficient_statistics": bool(
+            metadata.get("hospital_computed_plaintext_sufficient_statistics", False)
         ),
         "researcher_has_secret_key": False,
     }
@@ -1098,7 +1127,7 @@ def decrypt_dicom_analysis(job_id: str) -> dict:
             normalized_value
             * scale
             * scale
-            * float(metadata.get("voxel_volume_mm3", 1.0))
+            * float(metadata["voxel_volume_mm3"])
         )
     elif analysis == "VARIANCE":
         normalized_variance = _nonnegative_ckks(
@@ -1151,6 +1180,9 @@ def decrypt_dicom_analysis(job_id: str) -> dict:
             f"Unsupported decrypted DICOM HE analysis: {analysis}"
         )
 
+    if not math.isfinite(value):
+        raise RuntimeError("CKKS DICOM result is not finite")
+
     return {
         "job_id": job_id,
         "state": "DECRYPTED",
@@ -1161,6 +1193,7 @@ def decrypt_dicom_analysis(job_id: str) -> dict:
             str(metadata["unit"]),
         ),
         "ckks_approximate": True,
+        "accuracy_note": "Approximate CKKS result; no fixed error bound",
         "he_mode": metadata.get("he_mode", "BLOCK_STATS"),
         "representation": metadata["representation"],
         "modality": metadata["modality"],
@@ -1178,9 +1211,13 @@ def decrypt_dicom_analysis(job_id: str) -> dict:
         "voxel_count": metadata["voxel_count"],
         "voxel_spacing_mm": metadata.get("voxel_spacing_mm"),
         "voxel_volume_mm3": metadata.get("voxel_volume_mm3"),
+        "physical_volume_valid": metadata.get("physical_volume_valid", False),
         "researcher_has_plaintext_pixels": False,
         "researcher_has_encrypted_raw_voxels": bool(
             metadata.get("researcher_has_encrypted_raw_voxels", False)
+        ),
+        "hospital_computed_plaintext_sufficient_statistics": bool(
+            metadata.get("hospital_computed_plaintext_sufficient_statistics", False)
         ),
     }
 

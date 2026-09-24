@@ -1,5 +1,6 @@
 from pathlib import Path
 import fcntl
+import hashlib
 import os
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -70,3 +71,18 @@ def require_mutation_lock():
         )
 
         lock_file.close()
+
+
+def require_job_lock(job_id: str):
+    """Serialize one HE job without blocking unrelated Hospital mutations."""
+    lock_root = RUNTIME_ROOT / "job-locks"
+    lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_name = hashlib.sha256(job_id.encode("utf-8")).hexdigest() + ".lock"
+    path = lock_root / lock_name
+    with open(path, "a+") as lock_file:
+        os.chmod(path, 0o600)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

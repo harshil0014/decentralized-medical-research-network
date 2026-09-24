@@ -52,14 +52,6 @@ def frontend_preview_js():
     )
 
 
-@router.get("/frontend-extra-he.js", include_in_schema=False)
-def frontend_extra_he_js():
-    return FileResponse(
-        FRONTEND_ROOT / "extra-he.js",
-        media_type="application/javascript",
-    )
-
-
 @router.get(
     "/datasets/{dataset_id}/preview",
     dependencies=[Depends(require_hospital)],
@@ -136,5 +128,5 @@ def hospital_dataset_preview(dataset_id: str):
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Dataset preview failed: {exc}",
+            detail="Dataset preview failed; verify encrypted object availability",
         ) from exc

@@ -56,6 +56,7 @@ class _ResearcherCredential:
     researcher_id: str
     wallet_address: str
     token: str
+    enabled: bool
 
 
 def _load_token(path: Path) -> str:
@@ -130,6 +131,9 @@ def _load_researchers() -> tuple[_ResearcherCredential, ...]:
         researcher_id = str(row.get("id") or "").strip()
         wallet_address = str(row.get("walletAddress") or "").strip()
         token_file = str(row.get("tokenFile") or "").strip()
+        enabled = row.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise RuntimeError("Researcher enabled must be boolean")
 
         if not _RESEARCHER_ID.fullmatch(researcher_id):
             raise RuntimeError("Researcher id is invalid")
@@ -138,7 +142,11 @@ def _load_researchers() -> tuple[_ResearcherCredential, ...]:
             raise RuntimeError("Researcher walletAddress must be a valid Ethereum address")
         wallet_address = Web3.to_checksum_address(wallet_address)
 
-        token = _load_token(_resolve_token_file(token_file))
+        token_path = _resolve_token_file(token_file)
+        if not token_path.exists():
+            # Deleted credentials are revoked immediately.
+            continue
+        token = _load_token(token_path)
 
         if researcher_id in seen_ids:
             raise RuntimeError("Duplicate researcher id")
@@ -156,6 +164,7 @@ def _load_researchers() -> tuple[_ResearcherCredential, ...]:
                 researcher_id=researcher_id,
                 wallet_address=wallet_address,
                 token=token,
+                enabled=enabled,
             )
         )
 
@@ -163,8 +172,10 @@ def _load_researchers() -> tuple[_ResearcherCredential, ...]:
 
 
 _assert_private_path(AUTH_ROOT, directory=True)
-_HOSPITAL_TOKEN = _load_token(HOSPITAL_TOKEN_PATH)
-_RESEARCHERS = _load_researchers()
+# Credentials are read for each authentication. Removing a token file or
+# disabling a researcher takes effect without changing ledger attribution.
+_load_token(HOSPITAL_TOKEN_PATH)
+_load_researchers()
 
 
 def authenticated_identity(
@@ -197,14 +208,14 @@ def authenticated_identity(
 
     hospital_match = hmac.compare_digest(
         token,
-        _HOSPITAL_TOKEN,
+        _load_token(HOSPITAL_TOKEN_PATH),
     )
 
     matched_researcher: _ResearcherCredential | None = None
 
     # Compare against every configured researcher credential.
-    for credential in _RESEARCHERS:
-        if hmac.compare_digest(token, credential.token):
+    for credential in _load_researchers():
+        if hmac.compare_digest(token, credential.token) and credential.enabled:
             matched_researcher = credential
 
     if hospital_match:

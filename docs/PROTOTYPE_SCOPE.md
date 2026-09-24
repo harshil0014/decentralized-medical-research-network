@@ -30,7 +30,10 @@
 - no institutional OIDC/SSO yet; current per-researcher identities use service tokens
 - no multi-hospital validator/consortium deployment
 - no mainnet/public-chain deployment
-- key rotation is not historical ciphertext re-encryption
+- key rotation is not historical ciphertext re-encryption; suspected key compromise requires a new encrypted dataset import
+- normal recovery remains bound to its original chain ID and contract address; cross-deployment migration is not yet supported
+- CKKS statistics are approximate and do not carry a fixed numerical error bound
+- browser service tokens use session storage for the localhost demo
 - plaintext researcher download is disabled by default; a controlled local demo can explicitly opt in
 
 ## Next production-research directions

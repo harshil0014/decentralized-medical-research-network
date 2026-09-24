@@ -352,6 +352,37 @@ contract MedicalResearchRegistry {
         return out;
     }
 
+    function datasetCount() external view returns (uint256) {
+        return datasetIds.length;
+    }
+
+    function getDatasetPage(uint256 offset, uint256 limit) external view returns (Dataset[] memory) {
+        require(limit > 0 && limit <= 100, "page limit out of range");
+        if (offset >= datasetIds.length) return new Dataset[](0);
+        uint256 end = offset + limit;
+        if (end > datasetIds.length) end = datasetIds.length;
+        Dataset[] memory out = new Dataset[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            out[i - offset] = datasets[datasetIds[i]];
+        }
+        return out;
+    }
+
+    function datasetHistoryCount(string calldata datasetId) external view returns (uint256) {
+        return datasetHistory[datasetId].length;
+    }
+
+    function getDatasetHistoryPage(string calldata datasetId, uint256 offset, uint256 limit) external view returns (Dataset[] memory) {
+        require(limit > 0 && limit <= 100, "page limit out of range");
+        Dataset[] storage records = datasetHistory[datasetId];
+        if (offset >= records.length) return new Dataset[](0);
+        uint256 end = offset + limit;
+        if (end > records.length) end = records.length;
+        Dataset[] memory out = new Dataset[](end - offset);
+        for (uint256 i = offset; i < end; i++) out[i - offset] = records[i];
+        return out;
+    }
+
     function getDatasetHistory(string calldata datasetId) external view returns (Dataset[] memory) {
         return datasetHistory[datasetId];
     }
@@ -431,6 +462,21 @@ contract MedicalResearchRegistry {
 
     function getAccessHistory(string calldata requestId) external view returns (AccessRequest[] memory) {
         return accessHistory[requestId];
+    }
+
+    function accessHistoryCount(string calldata requestId) external view returns (uint256) {
+        return accessHistory[requestId].length;
+    }
+
+    function getAccessHistoryPage(string calldata requestId, uint256 offset, uint256 limit) external view returns (AccessRequest[] memory) {
+        require(limit > 0 && limit <= 100, "page limit out of range");
+        AccessRequest[] storage records = accessHistory[requestId];
+        if (offset >= records.length) return new AccessRequest[](0);
+        uint256 end = offset + limit;
+        if (end > records.length) end = records.length;
+        AccessRequest[] memory out = new AccessRequest[](end - offset);
+        for (uint256 i = offset; i < end; i++) out[i - offset] = records[i];
+        return out;
     }
 
     function _rotationKey(string memory datasetId, uint256 version) private pure returns (bytes32) {
@@ -577,5 +623,20 @@ contract MedicalResearchRegistry {
 
     function getHEJobHistory(string calldata jobId) external view returns (HEJobRecord[] memory) {
         return heJobHistory[jobId];
+    }
+
+    function heJobHistoryCount(string calldata jobId) external view returns (uint256) {
+        return heJobHistory[jobId].length;
+    }
+
+    function getHEJobHistoryPage(string calldata jobId, uint256 offset, uint256 limit) external view returns (HEJobRecord[] memory) {
+        require(limit > 0 && limit <= 100, "page limit out of range");
+        HEJobRecord[] storage records = heJobHistory[jobId];
+        if (offset >= records.length) return new HEJobRecord[](0);
+        uint256 end = offset + limit;
+        if (end > records.length) end = records.length;
+        HEJobRecord[] memory out = new HEJobRecord[](end - offset);
+        for (uint256 i = offset; i < end; i++) out[i - offset] = records[i];
+        return out;
     }
 }

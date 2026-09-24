@@ -80,6 +80,22 @@ def secure_plaintext_temp_root() -> Path:
     return root
 
 
+def require_staging_capacity(required_bytes: int, *, root: Path | None = None) -> None:
+    """Reserve a conservative margin before writing plaintext into tmpfs."""
+    if required_bytes < 0:
+        raise ValueError("Staging size must be nonnegative")
+    root = root or secure_plaintext_temp_root()
+    available = os.statvfs(root)
+    free_bytes = available.f_bavail * available.f_frsize
+    # Keep half the currently free RAM-backed filesystem for other jobs and
+    # the operating system. This is intentionally conservative for the demo.
+    if required_bytes > free_bytes // 2:
+        raise ValueError(
+            "Insufficient RAM-backed staging capacity for this input; "
+            "use a smaller dataset or a larger configured tmpfs"
+        )
+
+
 def create_secure_plaintext_temp(*, suffix: str = "") -> str:
     root = secure_plaintext_temp_root()
 

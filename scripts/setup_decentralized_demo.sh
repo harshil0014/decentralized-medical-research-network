@@ -2,8 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BESU_IMAGE="${MEDICAL_BESU_IMAGE:-hyperledger/besu:26.8.1}"
-IPFS_IMAGE="${MEDICAL_IPFS_IMAGE:-ipfs/kubo:v0.43.1}"
+BESU_IMAGE="${MEDICAL_BESU_IMAGE:-hyperledger/besu@sha256:6f3f21ce533383fcc8db3bce02252b59d5a9e776b72b5a1c8ecd2db011600042}"
+IPFS_IMAGE="${MEDICAL_IPFS_IMAGE:-ipfs/kubo@sha256:b293923d66e490e70ced64df42ea7a6cf7eac2740e3fb29101df18070fa7be48}"
 RUNTIME="${MEDICAL_DECENTRALIZED_RUNTIME:-$PWD/.runtime/decentralized}"
 QBFT="$RUNTIME/qbft"
 AUTH="${MEDICAL_REGISTRY_AUTH_DIR:-$HOME/.medical-decentralized/authority}"

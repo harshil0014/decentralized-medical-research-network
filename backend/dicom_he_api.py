@@ -11,7 +11,7 @@ from backend.api_auth import (
     require_hospital,
     require_researcher,
 )
-from backend.runtime_security import require_mutation_lock
+from backend.runtime_security import require_mutation_lock, require_job_lock
 from backend.researcher_signing import verify_researcher_signature
 from backend.storage_crypto import decrypt_bytes, is_encrypted_dataset
 from backend.he_service import fetch_ipfs_dataset_bytes, unpin_ipfs, verify_dataset_bytes
@@ -324,7 +324,7 @@ def encrypt_dicom(payload: DicomHEInput):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"DICOM HE encryption failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="DICOM HE encryption failed") from exc
 
 
 @router.get("/segments/{dataset_id}", dependencies=[Depends(require_hospital)])
@@ -358,7 +358,7 @@ def inspect_dicom_seg(dataset_id: str):
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"DICOM SEG inspection failed: {exc}",
+            detail="DICOM SEG inspection failed",
         ) from exc
 
 
@@ -385,7 +385,7 @@ def compute_signing_digest(
     }
 
 
-@router.post("/{job_id}/compute", dependencies=[Depends(require_mutation_lock)])
+@router.post("/{job_id}/compute", dependencies=[Depends(require_job_lock)])
 def compute_dicom(
     job_id: str,
     body: ResearcherSignatureInput,
@@ -468,7 +468,7 @@ def compute_dicom(
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"DICOM HE computation failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="DICOM HE computation failed; inspect job state before retrying") from exc
 
 
 @router.post("/{job_id}/decrypt", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
@@ -524,7 +524,7 @@ def decrypt_dicom(job_id: str):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"DICOM HE decryption failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="DICOM HE decryption failed; inspect job state before retrying") from exc
 
 
 @router.get("/{job_id}/ledger", dependencies=[Depends(require_authenticated)])
@@ -541,8 +541,10 @@ def read_dicom_ledger(job_id: str):
 
 
 @router.get("/{job_id}/history", dependencies=[Depends(require_authenticated)])
-def read_dicom_history(job_id: str):
-    history = _query("GetHEJobHistory", [job_id], "org2")
+def read_dicom_history(job_id: str, offset: int = 0, limit: int = 50):
+    if offset < 0 or not 1 <= limit <= 100:
+        raise HTTPException(status_code=400, detail="Invalid pagination")
+    history = _query("GetHEJobHistory", [job_id, str(offset), str(limit)], "org2")
     for item in history:
         value = item.get("value")
         if not isinstance(value, dict):

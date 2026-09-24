@@ -19,6 +19,7 @@ from backend.api_auth import (
 
 from backend.runtime_security import (
     require_mutation_lock,
+    require_job_lock,
 )
 from backend.researcher_signing import verify_researcher_signature
 
@@ -385,7 +386,7 @@ def compute_signing_digest(
 @router.post(
     "/{job_id}/compute-average",
     dependencies=[
-        Depends(require_mutation_lock),
+        Depends(require_job_lock),
     ],
 )
 def compute_average(
@@ -757,10 +758,14 @@ def read_he_ledger(
 )
 def read_he_history(
     job_id: str,
+    offset: int = 0,
+    limit: int = 50,
 ):
+    if offset < 0 or not 1 <= limit <= 100:
+        raise HTTPException(status_code=400, detail="Invalid pagination")
     history = _ledger_query(
         "GetHEJobHistory",
-        [job_id],
+        [job_id, str(offset), str(limit)],
         "org2",
     )
 

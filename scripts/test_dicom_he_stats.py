@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import io
 import math
+import os
 import zipfile
 
 import numpy as np
 import pydicom
+os.environ.setdefault("MEDICAL_MASTER_KEY_HEX", os.urandom(32).hex())
 from highdicom.seg import SegmentDescription, Segmentation
 from highdicom.seg.enum import SegmentAlgorithmTypeValues, SegmentationTypeValues
 from pydicom.dataset import Dataset, FileDataset
@@ -56,6 +58,9 @@ def make_slice(
     ds.Modality = modality
     ds.InstanceNumber = instance
     ds.ImagePositionPatient = [0.0, 0.0, float(instance)]
+    ds.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
+    ds.PixelSpacing = [1.0, 1.0]
+    ds.SliceThickness = "1"
     ds.Rows, ds.Columns = map(int, pixels.shape)
     ds.SamplesPerPixel = 1
     ds.PhotometricInterpretation = "MONOCHROME2"
@@ -99,6 +104,65 @@ def make_series_zip(
             )
         archive.writestr("README.txt", b"non-DICOM helper")
     return output.getvalue()
+
+
+def test_oblique_geometry_and_spacing() -> None:
+    # The plane normal has a negative Z component, so Z sorting reverses
+    # the correct order. Instance numbers are deliberately reversed too.
+    study_uid, series_uid = generate_uid(), generate_uid()
+    normal = np.array([-0.8, 0.0, -0.6])
+    orientation = [-0.6, 0.0, 0.8, 0.0, 1.0, 0.0]
+
+    def series(distances: list[float], *, inconsistent=False) -> bytes:
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+            for index, distance in enumerate(distances):
+                ds = pydicom.dcmread(io.BytesIO(make_slice(
+                    modality="CT",
+                    pixels=np.full((2, 2), index + 1, dtype=np.int16),
+                    study_uid=study_uid,
+                    series_uid=series_uid,
+                    instance=len(distances) - index,
+                )))
+                ds.ImagePositionPatient = (normal * distance).tolist()
+                ds.ImageOrientationPatient = ([1, 0, 0, 0, 1, 0]
+                                              if inconsistent and index == 1
+                                              else orientation)
+                stream = io.BytesIO()
+                ds.save_as(stream, enforce_file_format=True)
+                archive.writestr(f"slice_{index}.dcm", stream.getvalue())
+        return output.getvalue()
+
+    from backend.dicom_he_service import _build_volume, _read_dicom_datasets
+    regular = series([0.0, 2.0, 4.0])
+    volume, _ = _build_volume(_read_dicom_datasets(regular))
+    assert np.array_equal(volume[:, 0, 0], [1, 2, 3])
+    _, metadata = extract_dicom_analysis_values(regular)
+    assert metadata["physical_volume_valid"] is True
+    assert math.isclose(metadata["voxel_volume_mm3"], 2.0)
+
+    noisy = series([0.0, 2.002, 4.001])
+    _, noisy_metadata = extract_dicom_analysis_values(noisy)
+    assert noisy_metadata["physical_volume_valid"] is True
+
+    irregular = series([0.0, 2.0, 6.0])
+    _, irregular_metadata = extract_dicom_analysis_values(irregular)
+    assert irregular_metadata["physical_volume_valid"] is False
+    assert irregular_metadata["voxel_volume_mm3"] is None
+    try:
+        create_encrypted_dicom_job(np.arange(12), "TOTAL_ENERGY", irregular_metadata)
+    except ValueError as exc:
+        assert "regular physical" in str(exc)
+    else:
+        raise AssertionError("Irregular spacing was accepted for physical energy")
+
+    try:
+        extract_dicom_analysis_values(series([0.0, 2.0, 4.0], inconsistent=True))
+    except ValueError as exc:
+        assert "inconsistent orientation" in str(exc)
+    else:
+        raise AssertionError("Inconsistent orientation was accepted")
+    print("OBLIQUE GEOMETRY AND PHYSICAL SPACING: PASS")
 
 
 def make_dicom_seg_fixture() -> tuple[bytes, bytes, np.ndarray, str]:
@@ -535,6 +599,32 @@ def test_multislice_dicom_seg_roi() -> None:
     print("DICOM SEG MULTI-SLICE RAW-VOXEL ROI: PASS")
 
 
+def test_seg_geometry_fail_closed() -> None:
+    source_zip, seg_bytes, _ = make_multislice_dicom_seg_fixture()
+
+    def reject(edit) -> None:
+        ds = pydicom.dcmread(io.BytesIO(seg_bytes))
+        edit(ds)
+        stream = io.BytesIO()
+        ds.save_as(stream, enforce_file_format=True)
+        try:
+            extract_dicom_seg_analysis_values(source_zip, stream.getvalue(), 1)
+        except ValueError as exc:
+            assert "DICOM SEG" in str(exc) or "Segmentation" in str(exc)
+        else:
+            raise AssertionError("Invalid SEG geometry was accepted")
+
+    reject(lambda ds: delattr(ds.PerFrameFunctionalGroupsSequence[0], "PlanePositionSequence"))
+    reject(lambda ds: ds.PerFrameFunctionalGroupsSequence[0].PlanePositionSequence[0].__setattr__(
+        "ImagePositionPatient", [0, 0, 100]))
+    reject(lambda ds: ds.SharedFunctionalGroupsSequence[0].PlaneOrientationSequence[0].__setattr__(
+        "ImageOrientationPatient", [0, 1, 0, 1, 0, 0]))
+    reject(lambda ds: ds.ReferencedSeriesSequence[0].__setattr__(
+        "SeriesInstanceUID", generate_uid()))
+    reject(lambda ds: ds.PerFrameFunctionalGroupsSequence.__delitem__(0))
+    print("STRICT DICOM SEG GEOMETRY: PASS")
+
+
 def test_raw_multichunk_and_block_fallback() -> None:
     values = np.linspace(-1000.0, 1000.0, 5000, dtype=np.float64)
     metadata = {
@@ -553,6 +643,8 @@ def test_raw_multichunk_and_block_fallback() -> None:
         "original_shape": [1, 50, 100],
         "selected_shape": [1, 50, 100],
         "voxel_count": 5000,
+        "voxel_volume_mm3": 1.0,
+        "physical_volume_valid": True,
         "dicom_loader": "synthetic",
     }
 
@@ -568,6 +660,7 @@ def test_raw_multichunk_and_block_fallback() -> None:
         raw_job = created["job_id"]
         assert created["chunk_count"] == 2
         assert created["researcher_has_encrypted_raw_voxels"] is True
+        assert created["hospital_computed_plaintext_sufficient_statistics"] is False
         compute_encrypted_dicom_analysis(raw_job)
         decrypted = decrypt_dicom_analysis(raw_job)
         assert_close(float(decrypted["value"]), float(values.mean()), "RAW_MULTI_CHUNK")
@@ -592,6 +685,7 @@ def test_raw_multichunk_and_block_fallback() -> None:
                 == "ENCRYPTED_BLOCK_SUFFICIENT_STATISTICS"
             )
             assert created_block["researcher_has_encrypted_raw_voxels"] is False
+            assert created_block["hospital_computed_plaintext_sufficient_statistics"] is True
             compute_encrypted_dicom_analysis(block_job)
             decrypted_block = decrypt_dicom_analysis(block_job)
             assert_close(
@@ -609,13 +703,40 @@ def test_raw_multichunk_and_block_fallback() -> None:
             cleanup_dicom_he_job(block_job)
 
 
+def test_raw_above_old_ceiling() -> None:
+    values = np.full(300_000, 2.5, dtype=np.float64)
+    metadata = {
+        "modality": "MR", "unit": "relative_intensity", "scope": "WHOLE_VOLUME",
+        "slice_index": None, "roi_box": None,
+        "original_shape": [3, 100, 1000], "selected_shape": [3, 100, 1000],
+        "voxel_count": len(values), "dicom_loader": "synthetic",
+        "voxel_spacing_mm": None, "voxel_volume_mm3": None,
+        "physical_volume_valid": False,
+    }
+    job_id = None
+    try:
+        created = create_encrypted_dicom_job(values, "MEAN", metadata, "RAW_VOXELS")
+        job_id = created["job_id"]
+        assert created["chunk_count"] > 64
+        compute_encrypted_dicom_analysis(job_id)
+        result = decrypt_dicom_analysis(job_id)
+        assert abs(result["value"] - 2.5) < 1e-3, result
+    finally:
+        if job_id:
+            cleanup_dicom_he_job(job_id)
+    print("RAW VOXELS ABOVE 262144: PASS")
+
+
 def main() -> None:
+    test_oblique_geometry_and_spacing()
     test_ct_series()
     test_mr_series()
     test_privacy_guards()
     test_dicom_seg_roi()
     test_multislice_dicom_seg_roi()
+    test_seg_geometry_fail_closed()
     test_raw_multichunk_and_block_fallback()
+    test_raw_above_old_ceiling()
     print("DICOM HE STATISTICS: PASS")
 
 

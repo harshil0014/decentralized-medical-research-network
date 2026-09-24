@@ -9,7 +9,7 @@ from backend.api_auth import (
     require_hospital,
     require_researcher,
 )
-from backend.runtime_security import require_mutation_lock
+from backend.runtime_security import require_mutation_lock, require_job_lock
 from backend.researcher_signing import verify_researcher_signature
 from backend.he_service import (
     remove_research_exchange,
@@ -113,7 +113,7 @@ def compute_signing_digest(
 @router.post(
     "/{job_id}/compute",
     dependencies=[
-        Depends(require_mutation_lock),
+        Depends(require_job_lock),
     ],
 )
 def compute_sum(
@@ -211,7 +211,7 @@ def compute_sum(
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"IPFS-backed HE SUM computation failed: {exc}",
+            detail="HE SUM computation failed; inspect job state before retrying",
         ) from exc
 
 
@@ -297,5 +297,5 @@ def decrypt_he_sum(job_id: str):
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"IPFS-backed HE SUM decryption failed: {exc}",
+            detail="HE SUM decryption failed; inspect job state before retrying",
         ) from exc

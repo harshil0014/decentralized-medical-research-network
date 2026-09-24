@@ -11,7 +11,7 @@ from backend.dicom_series import deidentify_dicom_series_zip
 from backend.dicom_utils import deidentify_dataset
 
 
-SENTINEL = "PHI-SENTINEL-DO-NOT-KEEP"
+SENTINEL = "PHI-SENTINEL"
 
 
 def contains_sentinel(dataset: pydicom.Dataset) -> bool:

@@ -111,7 +111,59 @@ def main():
             time.sleep(2)
         else:
             raise RuntimeError("Primary Besu node did not resync after restart")
-    print("DECENTRALIZED TOPOLOGY: PASS (4 validators, 3 IPFS peers, outages)")
+
+    # A complete stop/start must retain both the chain and replicated pins.
+    with tempfile.NamedTemporaryFile(delete=False) as handle:
+        persistent_sample = os.urandom(128)
+        handle.write(persistent_sample)
+        persistent_path = Path(handle.name)
+    persistent_cid = ipfs_storage.add_file(persistent_path)
+    try:
+        for name in BESU + IPFS:
+            docker("stop", name)
+        for name in BESU + IPFS:
+            docker("start", name)
+        for url in RPC_URLS:
+            wait_rpc(url)
+            assert rpc(url, "eth_getCode", [address, "latest"]) == codes[0]
+        starting_height = int(rpc(RPC_URLS[0], "eth_blockNumber"), 16)
+        for _ in range(90):
+            heights = [int(rpc(url, "eth_blockNumber"), 16) for url in RPC_URLS]
+            peers = [int(rpc(url, "net_peerCount"), 16) for url in RPC_URLS]
+            if min(peers) >= 3 and max(heights) - min(heights) <= 1 and min(heights) >= starting_height + 2:
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError("Validators did not resume shared block production after restart")
+        from web3 import Web3
+        authority_key = Path(os.environ.get(
+            "MEDICAL_HOSPITAL_PRIVATE_KEY_FILE",
+            str(Path.home() / ".medical-decentralized/authority/hospital_eth.key"),
+        )).read_text().strip()
+        w3 = Web3(Web3.HTTPProvider(RPC_URLS[0], request_kwargs={"timeout": 15}))
+        sender = w3.eth.account.from_key(authority_key).address
+        signed = w3.eth.account.sign_transaction({
+            "chainId": deployment["chainId"], "from": sender, "to": sender,
+            "value": 0, "nonce": w3.eth.get_transaction_count(sender, "pending"),
+            "gas": 21000, "gasPrice": w3.eth.gas_price,
+        }, authority_key)
+        receipt = w3.eth.wait_for_transaction_receipt(
+            w3.eth.send_raw_transaction(signed.raw_transaction), timeout=90,
+        )
+        assert receipt.status == 1, "Validator restart did not resume transactions"
+        for name in IPFS:
+            for _ in range(45):
+                if docker("inspect", "-f", "{{.State.Health.Status}}", name) == "healthy":
+                    break
+                time.sleep(2)
+            else:
+                raise RuntimeError(f"IPFS peer did not recover after restart: {name}")
+            assert persistent_cid in docker("exec", name, "ipfs", "pin", "ls", persistent_cid)
+        assert ipfs_storage.cat(persistent_cid) == persistent_sample
+    finally:
+        persistent_path.unlink(missing_ok=True)
+        ipfs_storage.unpin(persistent_cid)
+    print("DECENTRALIZED TOPOLOGY: PASS (4 validators, 3 IPFS peers, outages, restart persistence)")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@ const state = {
   token: sessionStorage.getItem("medical_token") || "",
   role: sessionStorage.getItem("medical_role") || "",
   datasets: [],
+  datasetOffset: 0,
+  datasetTotal: 0,
   plaintextDownloadsEnabled: false,
   ethereumAddress: "",
 };
@@ -134,12 +136,33 @@ async function openApp() {
 
 async function refreshDatasets() {
   try {
-    const data = await apiJson("/datasets");
+    const [data, count] = await Promise.all([
+      apiJson("/datasets?offset=0&limit=50"),
+      apiJson("/datasets/count"),
+    ]);
     state.datasets = Array.isArray(data) ? data : (data.datasets || []);
+    state.datasetOffset = 50;
+    state.datasetTotal = count.count;
     renderDatasetTable();
+    updateDatasetPager();
   } catch (error) {
     showToast(error.message);
   }
+}
+
+async function loadMoreDatasets() {
+  try {
+    const data = await apiJson(`/datasets?offset=${state.datasetOffset}&limit=50`);
+    state.datasets.push(...data);
+    state.datasetOffset += 50;
+    renderDatasetTable();
+    updateDatasetPager();
+  } catch (error) { showToast(error.message); }
+}
+
+function updateDatasetPager() {
+  const control = $("loadMoreDatasets");
+  if (control) control.classList.toggle("hidden", state.datasetOffset >= state.datasetTotal);
 }
 
 function renderAll() {
@@ -156,7 +179,9 @@ function renderDatasetsView() {
   toolbar.className = "toolbar";
   const title = document.createElement("h2");
   title.textContent = "Datasets";
-  toolbar.append(title, button("Refresh", refreshDatasets));
+  const more = button("Load more", loadMoreDatasets);
+  more.id = "loadMoreDatasets";
+  toolbar.append(title, button("Refresh", refreshDatasets), more);
   root.append(toolbar);
 
   if (state.role === "hospital") root.append(buildUploadCard());
@@ -168,6 +193,7 @@ function renderDatasetsView() {
   card.append(table);
   root.append(card);
   renderDatasetTable();
+  updateDatasetPager();
 }
 
 function buildUploadCard() {
@@ -429,13 +455,14 @@ function renderHEView() {
     root.append(
       buildEncryptCard(),
       buildDecryptCard(),
+      buildSumDecryptCard(),
       buildDicomSegmentInspectorCard(),
       buildDicomEncryptCard(),
       buildDicomDecryptCard(),
     );
   }
   if (state.role === "researcher") {
-    root.append(buildComputeCard(), buildDicomComputeCard());
+    root.append(buildComputeCard(), buildSumComputeCard(), buildDicomComputeCard());
   }
   root.append(buildHELookupCard(), buildDicomHELookupCard());
 }
@@ -541,6 +568,54 @@ function buildComputeCard() {
   return card;
 }
 
+function buildSumComputeCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const title = document.createElement("h3");
+  title.textContent = "Compute Sum";
+  const input = document.createElement("input");
+  input.placeholder = "Sum Job ID";
+  const out = outputBox("sumComputeOutput");
+  const action = button("Compute Sum", async () => {
+    const id = input.value.trim();
+    if (!id) return;
+    action.disabled = true;
+    try {
+      const signing = await apiJson(`/he/sum/${encodeURIComponent(id)}/signing-digest`);
+      const signature = await signResearcherDigest(signing.signingDigest);
+      const result = await apiJson(`/he/sum/${encodeURIComponent(id)}/compute`, {
+        method: "POST", ...jsonBody({ signature }),
+      });
+      out.textContent = JSON.stringify(result, null, 2);
+    } catch (error) { out.textContent = `Error: ${error.message}`; }
+    finally { action.disabled = false; }
+  }, "primary");
+  card.append(title, input, action, out);
+  return card;
+}
+
+function buildSumDecryptCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const title = document.createElement("h3");
+  title.textContent = "Decrypt Sum Result";
+  const input = document.createElement("input");
+  input.placeholder = "Sum Job ID";
+  const out = outputBox("sumDecryptOutput");
+  const action = button("Decrypt Sum", async () => {
+    const id = input.value.trim();
+    if (!id) return;
+    action.disabled = true;
+    try {
+      const result = await apiJson(`/he/sum/${encodeURIComponent(id)}/decrypt`, { method: "POST" });
+      out.textContent = JSON.stringify(result, null, 2);
+    } catch (error) { out.textContent = `Error: ${error.message}`; }
+    finally { action.disabled = false; }
+  }, "primary");
+  card.append(title, input, action, out);
+  return card;
+}
+
 function buildHELookupCard() {
   const card = document.createElement("div");
   card.className = "card";
@@ -622,7 +697,7 @@ function buildDicomEncryptCard() {
     </select>
     <select name="he_mode" title="HE mode">
       <option value="RAW_VOXELS">Raw Voxels (CKKS)</option>
-      <option value="BLOCK_STATS">Block Stats (large volume)</option>
+      <option value="BLOCK_STATS">Hospital computed sufficient statistics, then CKKS</option>
     </select>
     <select name="scope" title="Scope">
       <option value="WHOLE_VOLUME">Whole Volume</option>
@@ -640,7 +715,7 @@ function buildDicomEncryptCard() {
     <input name="segmentation_dataset_id" placeholder="DICOM SEG Dataset ID (DICOM_SEG only)">
     <input name="segmentation_request_id" placeholder="Approved SEG Request ID (DICOM_SEG only)">
     <input name="segment_number" type="number" min="1" placeholder="Segment number (DICOM_SEG only)">
-    <div class="full hint">DICOM SEG selects a hospital-side binary segment, then encrypts only its source CT/MR voxels. Raw-voxel mode limit: 262,144 selected voxels; use Block Stats for larger segments.</div>
+    <div class="full hint">RAW_VOXELS encrypts selected CT/MR voxels. BLOCK_STATS has the Hospital compute plaintext sums and squared sums first, then encrypts those sufficient statistics; higher moments require RAW_VOXELS. DICOM SEG selection occurs at the Hospital.</div>
     <div class="full form-actions"><button class="primary" type="submit">Encrypt DICOM</button></div>
   `;
   const out = outputBox("dicomEncryptOutput");

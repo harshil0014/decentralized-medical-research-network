@@ -1,5 +1,8 @@
 from pathlib import Path
 import hashlib
+import copy
+import hmac
+import os
 
 import pydicom
 from pydicom.uid import generate_uid
@@ -108,6 +111,7 @@ def deidentify_dataset(
     *,
     visual_phi_reviewed: bool = False,
 ) -> None:
+    original = copy.deepcopy(ds)
     _reject_visual_identity_risk(
         ds,
         visual_phi_reviewed=visual_phi_reviewed,
@@ -143,7 +147,12 @@ def deidentify_dataset(
     def remap(uid) -> str:
         value = str(uid)
         if value not in uid_map:
-            uid_map[value] = generate_uid()
+            secret = os.environ.get("MEDICAL_MASTER_KEY_HEX", "")
+            if len(secret) == 64:
+                digest = hmac.new(bytes.fromhex(secret), value.encode("ascii"), hashlib.sha256).digest()
+                uid_map[value] = f"2.25.{int.from_bytes(digest[:16], 'big')}"
+            else:
+                uid_map[value] = generate_uid()
         return uid_map[value]
 
     identity_uid_keywords = {
@@ -155,17 +164,25 @@ def deidentify_dataset(
         "ReferencedSOPInstanceUID",
     }
 
-    def remap_dataset_uids(dataset: pydicom.Dataset) -> None:
+    def remap_dataset_uids(dataset: pydicom.Dataset, source: pydicom.Dataset) -> None:
         for element in dataset:
             if element.VR == "SQ":
-                for item in element.value:
-                    remap_dataset_uids(item)
+                source_sequence = source.get(element.keyword, [])
+                for index, item in enumerate(element.value):
+                    if index < len(source_sequence):
+                        remap_dataset_uids(item, source_sequence[index])
                 continue
 
-            if element.keyword in identity_uid_keywords and element.value:
-                element.value = remap(element.value)
+            if element.keyword in identity_uid_keywords:
+                original_value = source.get(element.keyword)
+                if original_value:
+                    element.value = remap(original_value)
+            elif element.keyword == "ReferencedSOPClassUID":
+                original_value = source.get(element.keyword)
+                if original_value:
+                    element.value = original_value
 
-    remap_dataset_uids(ds)
+    remap_dataset_uids(ds, original)
 
     if "SOPInstanceUID" in ds and "MediaStorageSOPInstanceUID" in ds.file_meta:
         ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
@@ -183,11 +200,9 @@ def deidentify_dataset(
     ds.preamble = b"\x00" * 128
 
     ds.PatientIdentityRemoved = "YES"
-    ds.DeidentificationMethod = (
-        "DICOM PS3.15 2024b Basic Profile header rules; additional free-text/"
-        "private-tag/overlay cleanup; identity UIDs remapped; pixel PHI requires "
-        "separate visual safeguards"
-    )
+    # LO permits at most 64 characters. Pixel review is a separate Hospital
+    # attestation, not an automated part of header de-identification.
+    ds.DeidentificationMethod = "PS3.15 2024b Basic Profile; UID remap; pixel visual review"
 
 
 def deidentify_dicom_in_place(

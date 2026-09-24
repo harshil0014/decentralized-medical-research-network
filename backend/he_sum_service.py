@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import subprocess
 from pathlib import Path
@@ -127,16 +128,21 @@ def decrypt_sum(job_id: str) -> dict:
 
     output = _run(HOSPITAL_DECRYPT_SUM, job)
     match = re.search(
-        r"Decrypted result:\s*([-+]?[0-9]+(?:\.[0-9]+)?)",
+        r"Decrypted result:\s*([-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)",
         output,
     )
 
     if not match:
         raise RuntimeError("Could not parse decrypted HE sum")
 
+    value = float(match.group(1))
+    if not math.isfinite(value):
+        raise RuntimeError("CKKS sum is not finite")
     return {
         "job_id": job_id,
         "operation": "SUM",
         "state": "DECRYPTED",
-        "sum": float(match.group(1)),
+        "sum": value,
+        "ckks_approximate": True,
+        "accuracy_note": "Approximate CKKS result; no fixed error bound",
     }

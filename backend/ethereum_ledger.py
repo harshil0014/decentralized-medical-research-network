@@ -65,8 +65,8 @@ class _FailoverHTTPProvider(Web3.HTTPProvider):
 
 def _http_error(action: str, exc: Exception) -> HTTPException:
     return HTTPException(
-        status_code=500,
-        detail=f"Ethereum {action} failed: {exc}",
+        status_code=503,
+        detail=f"Ethereum {action} is unavailable or transaction state is uncertain; check ledger state before retrying",
     )
 
 
@@ -178,7 +178,7 @@ def _org_name(address: str) -> str:
     value = (address or "").lower()
 
     if value == data["hospitalAddress"].lower():
-        return "Org1MSP"
+        return "Hospital"
 
     return address
 
@@ -523,19 +523,31 @@ def query(function: str, args: list[str], org: str = "org2") -> str:
         return json.dumps(locator)
 
     if function == "GetAllDatasets":
+        offset = int(args[0]) if args else 0
+        limit = int(args[1]) if len(args) > 1 else 50
+        if offset < 0 or not 1 <= limit <= 100:
+            raise HTTPException(status_code=400, detail="Invalid pagination")
         return json.dumps([
             _dataset(item)
-            for item in _call("getAllDatasets", [], org)
+            for item in _call("getDatasetPage", [offset, limit], org)
+            if item[10]
         ])
+
+    if function == "DatasetCount":
+        return str(_call("datasetCount", [], org))
 
     if function == "GetDatasetHistory":
         history = []
+        offset = int(args[1]) if len(args) > 1 else 0
+        limit = int(args[2]) if len(args) > 2 else 50
+        if offset < 0 or not 1 <= limit <= 100:
+            raise HTTPException(status_code=400, detail="Invalid pagination")
         for index, row in enumerate(
-            _call("getDatasetHistory", args[:1], org)
+            _call("getDatasetHistoryPage", [args[0], offset, limit], org)
         ):
             value = _dataset(row)
             history.append({
-                "txId": f"ethereum-history-{index + 1}",
+                "txId": f"ethereum-history-{offset + index + 1}",
                 "timestamp": value["updatedAt"],
                 "isDelete": False,
                 "value": value,
@@ -568,12 +580,16 @@ def query(function: str, args: list[str], org: str = "org2") -> str:
 
     if function == "GetAccessHistory":
         history = []
+        offset = int(args[1]) if len(args) > 1 else 0
+        limit = int(args[2]) if len(args) > 2 else 50
+        if offset < 0 or not 1 <= limit <= 100:
+            raise HTTPException(status_code=400, detail="Invalid pagination")
         for index, row in enumerate(
-            _call("getAccessHistory", args[:1], org)
+            _call("getAccessHistoryPage", [args[0], offset, limit], org)
         ):
             value = _request(row)
             history.append({
-                "txId": f"ethereum-history-{index + 1}",
+                "txId": f"ethereum-history-{offset + index + 1}",
                 "timestamp": value["decidedAt"] or value["requestedAt"],
                 "isDelete": False,
                 "value": value,
@@ -604,8 +620,12 @@ def query(function: str, args: list[str], org: str = "org2") -> str:
 
     if function == "GetHEJobHistory":
         history = []
+        offset = int(args[1]) if len(args) > 1 else 0
+        limit = int(args[2]) if len(args) > 2 else 50
+        if offset < 0 or not 1 <= limit <= 100:
+            raise HTTPException(status_code=400, detail="Invalid pagination")
         for index, row in enumerate(
-            _call("getHEJobHistory", args[:1], org)
+            _call("getHEJobHistoryPage", [args[0], offset, limit], org)
         ):
             value = _he_job(row)
             timestamp = (
@@ -614,7 +634,7 @@ def query(function: str, args: list[str], org: str = "org2") -> str:
                 or value["createdAt"]
             )
             history.append({
-                "txId": f"ethereum-history-{index + 1}",
+                "txId": f"ethereum-history-{offset + index + 1}",
                 "timestamp": timestamp,
                 "isDelete": False,
                 "value": value,

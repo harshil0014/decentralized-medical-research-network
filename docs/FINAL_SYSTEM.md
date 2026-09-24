@@ -64,7 +64,7 @@ FastAPI generates `ds-<32 hex>` and `req-<32 hex>` identifiers. Caller-provided 
 - plaintext medical upload staging is restricted to verified tmpfs/ramfs and never relies on ordinary-disk deletion for erasure.
 - successful dataset registration and key rotation refresh a chain-bound encrypted recovery bundle; restore verifies key metadata and private-locator commitments against Ethereum transactionally.
 - Existing ciphertext keeps the key generation used at encryption time. Rotation creates a new active generation but does not rewrite old IPFS objects.
-- The Hospital remains a single privileged local wallet. Researchers now have independent service-token identities mapped to distinct local wallets, but institutional OIDC/SSO, provisioning and revocation remain production work.
+- The Hospital remains a single privileged local wallet. Researchers have individual service-token identities bound to externally owned wallets; the backend holds no researcher private keys. Institutional OIDC/SSO is outside this prototype.
 - DICOM sanitization is not a formal HIPAA/GDPR/DPDP compliance claim.
 - CT/MR upload is fail-closed unless BurnedInAnnotation and RecognizableVisualFeatures are both `NO` and the Hospital explicitly attests that pixel data was visually reviewed.
 - Plaintext researcher release is disabled by default and is a deliberate demo-only opt-in.

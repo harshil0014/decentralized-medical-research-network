@@ -15,6 +15,7 @@ const hospital = hospitalKeyFile
   : await provider.getSigner(0);
 const researcher = ethers.Wallet.createRandom();
 const hospitalContract = new ethers.Contract(deployment.contractAddress, abi, hospital);
+const startingDatasetCount = Number(await hospitalContract.datasetCount());
 
 async function sendTx(contract, method, ...args) {
   const fn = contract.getFunction(method);
@@ -72,6 +73,21 @@ assert.equal(ds.storageState, "PRIVATE_PENDING");
 await sendTx(hospitalContract, "finalizeDataset", datasetId, commitment);
 ds = await hospitalContract.getDataset(datasetId);
 assert.equal(ds.storageState, "PRIVATE_READY");
+const pageIds = [];
+for (let i = 0; i < 5; i++) {
+  const id = "ds-" + randomBytes(16).toString("hex");
+  pageIds.push(id);
+  await sendTx(hospitalContract, "registerDataset", id, "CSV", metadataCommitment, "ACTIVE");
+}
+assert.equal(Number(await hospitalContract.datasetCount()), startingDatasetCount + 6);
+assert.equal((await hospitalContract.getDatasetPage(startingDatasetCount, 2)).length, 2);
+assert.equal((await hospitalContract.getDatasetPage(startingDatasetCount + 2, 2)).length, 2);
+assert.equal((await hospitalContract.getDatasetPage(startingDatasetCount + 4, 2)).length, 2);
+assert.equal((await hospitalContract.getDatasetPage(startingDatasetCount + 6, 2)).length, 0);
+assert.equal((await hospitalContract.getDatasetPage(startingDatasetCount, 2))[0].datasetId, datasetId);
+assert.equal(Number(await hospitalContract.datasetHistoryCount(datasetId)), 2);
+assert.equal((await hospitalContract.getDatasetHistoryPage(datasetId, 1, 1))[0].storageState, "PRIVATE_READY");
+await assert.rejects(hospitalContract.getDatasetPage(0, 101));
 
 let unauthorized = false;
 try {

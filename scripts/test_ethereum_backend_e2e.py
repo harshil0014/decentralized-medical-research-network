@@ -169,8 +169,13 @@ assert me1.status_code == 200 and me2.status_code == 200
 assert me1.json()["researcherId"] == "researcher-a"
 assert me2.json()["researcherId"] == "researcher-b"
 assert me1.json()["ethereumAddress"].lower() != me2.json()["ethereumAddress"].lower()
-assert health.json()["blockchain"] == "ethereum"
-assert health.json()["ethereum"]["connected"] is True
+assert health.json() == {"status": "ok"}
+diagnostics_denied = client.get("/admin/diagnostics")
+assert diagnostics_denied.status_code in (401, 403)
+diagnostics = client.get("/admin/diagnostics", headers=hospital)
+assert diagnostics.status_code == 200, diagnostics.text
+assert diagnostics.json()["blockchain"] == "ethereum"
+assert diagnostics.json()["ethereum"]["connected"] is True
 
 upload = client.post(
     "/datasets/upload",
@@ -190,6 +195,11 @@ assert dataset_id.startswith("ds-") and len(dataset_id) == 35
 assert dataset_label not in dataset_id
 assert upload.json()["metadataSummary"].startswith("sha256:")
 assert "Synthetic glucose cohort" not in upload.json()["metadataSummary"]
+dataset_slots = client.get("/datasets/count", headers=researcher)
+assert dataset_slots.status_code == 200 and dataset_slots.json()["count"] >= 1
+page = client.get("/datasets?offset=0&limit=1", headers=researcher)
+assert page.status_code == 200 and len(page.json()) <= 1
+assert client.get("/datasets?limit=101", headers=researcher).status_code == 422
 public_dataset = client.get(f"/datasets/{dataset_id}", headers=hospital)
 assert public_dataset.status_code == 200, public_dataset.text
 assert public_dataset.json()["dataType"] == "CSV"

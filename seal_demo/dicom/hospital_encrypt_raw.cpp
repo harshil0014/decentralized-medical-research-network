@@ -41,14 +41,6 @@ int main()
 
     const size_t value_count =
         static_cast<size_t>(bytes / static_cast<streamsize>(sizeof(double)));
-    vector<double> values(value_count);
-    if (!raw.read(
-            reinterpret_cast<char *>(values.data()),
-            static_cast<streamsize>(value_count * sizeof(double)))) {
-        cerr << "Failed to read raw voxel input\n";
-        return 1;
-    }
-
     EncryptionParameters parms(scheme_type::ckks);
     const size_t degree = 8192;
     parms.set_poly_modulus_degree(degree);
@@ -99,11 +91,11 @@ int main()
         const size_t end = min(begin + slots, value_count);
 
         vector<double> packed(slots, 0.0);
-        copy(
-            values.begin() + static_cast<ptrdiff_t>(begin),
-            values.begin() + static_cast<ptrdiff_t>(end),
-            packed.begin()
-        );
+        const streamsize chunk_bytes = static_cast<streamsize>((end - begin) * sizeof(double));
+        if (!raw.read(reinterpret_cast<char *>(packed.data()), chunk_bytes)) {
+            cerr << "Failed to read raw voxel chunk\n";
+            return 1;
+        }
 
         Plaintext plain;
         Ciphertext encrypted;

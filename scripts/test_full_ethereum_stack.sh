@@ -12,7 +12,7 @@ if [ ! -x backend/.venv/bin/python ]; then
   python3 -m venv backend/.venv
 fi
 backend/.venv/bin/pip install --upgrade pip
-backend/.venv/bin/pip install -r requirements.txt
+backend/.venv/bin/pip install -r requirements.lock
 
 echo
 echo "===== 3/7 PYTHON ETHEREUM ADAPTER ====="
@@ -28,7 +28,7 @@ else
     --name medical-ipfs \
     -v medical-ipfs-data:/data/ipfs \
     -p 127.0.0.1:5001:5001 \
-    ipfs/kubo:latest >/dev/null
+    ipfs/kubo@sha256:b293923d66e490e70ced64df42ea7a6cf7eac2740e3fb29101df18070fa7be48 >/dev/null
 fi
 
 for i in $(seq 1 60); do
@@ -49,6 +49,7 @@ echo "===== 5/7 MICROSOFT SEAL 4.4 ====="
 if ! find /usr/local -name SEALConfig.cmake -print -quit 2>/dev/null | grep -q .; then
   rm -rf /tmp/SEAL
   git clone --depth 1 --branch v4.4.0 https://github.com/microsoft/SEAL.git /tmp/SEAL
+  test "$(git -C /tmp/SEAL rev-parse HEAD)" = 04d53b99ce745efc26bb4965be609b9894755227
   cmake -S /tmp/SEAL -B /tmp/SEAL/build \
     -DSEAL_BUILD_EXAMPLES=OFF \
     -DSEAL_BUILD_TESTS=OFF
