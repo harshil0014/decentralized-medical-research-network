@@ -12,6 +12,7 @@ from backend.api_auth import (
     require_researcher,
 )
 from backend.runtime_security import require_mutation_lock
+from backend.researcher_signing import verify_researcher_signature
 from backend.storage_crypto import decrypt_bytes, is_encrypted_dataset
 from backend.he_service import fetch_ipfs_dataset_bytes, unpin_ipfs, verify_dataset_bytes
 from backend.dicom_he_service import (
@@ -67,6 +68,10 @@ class DicomROIBox(BaseModel):
     col_end: int
 
 
+class ResearcherSignatureInput(BaseModel):
+    signature: str
+
+
 class DicomHEInput(BaseModel):
     dataset_id: str
     request_id: str
@@ -88,6 +93,11 @@ def _invoke(function: str, args: list[str], org: str) -> None:
 def _query(function: str, args: list[str], org: str):
     from backend.app import query
     return json.loads(query(function, args, org))
+
+
+def _scalar_query(function: str, args: list[str], org: str) -> str:
+    from backend.app import query
+    return query(function, args, org)
 
 
 def _require_approved_access(
@@ -352,9 +362,33 @@ def inspect_dicom_seg(dataset_id: str):
         ) from exc
 
 
+@router.get("/{job_id}/signing-digest")
+def compute_signing_digest(
+    job_id: str,
+    identity: AuthIdentity = Depends(require_researcher),
+):
+    actor_org = researcher_org(identity)
+    from backend.ethereum_ledger import account_address
+    actor_address = account_address(actor_org)
+    ledger = _query("ReadHEJob", [job_id], actor_org)
+    _require_dicom_job(ledger)
+    if str(ledger.get("researcherAddress") or "").lower() != actor_address.lower():
+        raise HTTPException(status_code=403, detail="DICOM HE job belongs to a different researcher wallet")
+    if ledger.get("status") != "ENCRYPTED":
+        raise HTTPException(status_code=409, detail="DICOM HE job is not in ENCRYPTED state")
+    digest = _scalar_query("HEComputeDigest", [job_id], actor_org)
+    return {
+        "jobId": job_id,
+        "signingDigest": digest,
+        "ethereumAddress": actor_address,
+        "signatureScheme": "EIP-191 personal_sign",
+    }
+
+
 @router.post("/{job_id}/compute", dependencies=[Depends(require_mutation_lock)])
 def compute_dicom(
     job_id: str,
+    body: ResearcherSignatureInput,
     identity: AuthIdentity = Depends(require_researcher),
 ):
     result_cid = None
@@ -381,6 +415,9 @@ def compute_dicom(
                 actor_address=actor_address,
             )
 
+        signing_digest = _scalar_query("HEComputeDigest", [job_id], actor_org)
+        verify_researcher_signature(identity, signing_digest, body.signature)
+
         restore_dicom_ciphertext_bundle(
             job_id,
             ledger["ciphertextCid"],
@@ -396,9 +433,9 @@ def compute_dicom(
 
         try:
             _invoke(
-                "RecordHEComputation",
-                [job_id, result_cid, result["result_sha256"]],
-                actor_org,
+                "RecordHEComputationSigned",
+                [job_id, result_cid, result["result_sha256"], body.signature],
+                "org1",
             )
         except Exception:
             unpin_ipfs(result_cid)
