@@ -23,6 +23,11 @@ from backend.runtime_security import (
     require_mutation_lock,
 )
 
+from backend.secure_temp import (
+    create_secure_plaintext_temp,
+    secure_plaintext_temp_root,
+)
+
 from backend.storage_crypto import (
     dataset_key_exists,
     decrypt_bytes,
@@ -223,13 +228,14 @@ def upload_dataset(
 
         suffix = Path(file.filename or "upload.bin").suffix
 
-        with tempfile.NamedTemporaryFile(
-            delete=False,
+        # Medical plaintext never stages on the ordinary filesystem.
+        # This path is verified to be RAM-backed (tmpfs/ramfs).
+        temp_path = create_secure_plaintext_temp(
             suffix=suffix,
-        ) as tmp:
-            temp_path = tmp.name
-            sha256 = hashlib.sha256()
+        )
+        sha256 = hashlib.sha256()
 
+        with open(temp_path, "wb") as tmp:
             while True:
                 chunk = file.file.read(1024 * 1024)
                 if not chunk:
@@ -237,6 +243,9 @@ def upload_dataset(
 
                 sha256.update(chunk)
                 tmp.write(chunk)
+
+            tmp.flush()
+            os.fsync(tmp.fileno())
 
         digest = sha256.hexdigest()
 
