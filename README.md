@@ -44,7 +44,7 @@ Homomorphic encryption
 
 No raw medical file, plaintext patient value, AES key, or Microsoft SEAL secret key is written to Ethereum.
 
-Dataset descriptions and access purposes are always represented on Ethereum as `sha256:<digest>` commitments, and the Solidity contract rejects plaintext values. DICOM free-text Study/Series/Protocol descriptions are removed before encrypted storage.
+Dataset and access-request identifiers written to Ethereum are server-generated opaque values (`ds-<32 hex>` and `req-<32 hex>`); Solidity rejects semantic/non-opaque IDs. Dataset descriptions and access purposes are always represented on Ethereum as `sha256:<digest>` commitments, and the Solidity contract rejects plaintext values. DICOM free-text Study/Series/Protocol descriptions are removed before encrypted storage.
 
 ## One-shot local setup
 
@@ -90,11 +90,14 @@ docker run -d --name medical-ipfs \
   ipfs/kubo:v0.43.1
 ```
 
-Create API tokens and localhost TLS exactly as before, then start:
+Provide a 32-byte dataset-key wrapping secret from outside the repository/key directory, then create API tokens and localhost TLS and start:
 
 ```bash
+export MEDICAL_MASTER_KEY_HEX="$(openssl rand -hex 32)"
 ./scripts/start_secure_api.sh
 ```
+
+The application never writes this master key to its dataset-key directory. Dataset AES keys are stored there only as AES-256-GCM-wrapped `MEDKEY01` blobs. For a real deployment, inject the wrapping secret from a secrets manager/KMS/HSM rather than generating it ad hoc in a shell session.
 
 Open:
 
@@ -192,6 +195,10 @@ Researcher plaintext download is disabled by default. For an explicitly controll
 - The primary and secondary requests must belong to the same researcher wallet.
 - Consent/access is re-checked before researcher computation **and again before Hospital decryption**.
 - Revoking either required grant blocks further computation/decryption.
+
+## Dataset-key protection
+
+Dataset AES keys are not stored as raw 32-byte files. Each key generation is wrapped with AES-256-GCM using the externally supplied `MEDICAL_MASTER_KEY_HEX`. Legacy raw key files are migrated atomically to the wrapped `MEDKEY01` format on first successful load. Key files and metadata remain Hospital-local with restrictive permissions.
 
 ## Key rotation semantics
 
