@@ -148,6 +148,26 @@ assert request_label not in request_id
 assert create.json()["status"] == "PENDING"
 assert create.json()["purpose"].startswith("sha256:")
 assert "Synthetic glucose analysis" not in create.json()["purpose"]
+assert create.json()["requesterAddress"].lower() == me1.json()["ethereumAddress"].lower()
+
+researcher2_request = client.post(
+    "/requests",
+    headers=researcher2,
+    json={
+        "dataset_id": dataset_id,
+        "purpose": "Independent second researcher request",
+    },
+)
+assert researcher2_request.status_code == 200, researcher2_request.text
+assert researcher2_request.json()["researcherId"] == "researcher-b"
+assert (
+    researcher2_request.json()["requesterAddress"].lower()
+    == me2.json()["ethereumAddress"].lower()
+)
+assert (
+    researcher2_request.json()["requesterAddress"].lower()
+    != create.json()["requesterAddress"].lower()
+)
 
 approve = client.post(
     f"/requests/{request_id}/approve",
