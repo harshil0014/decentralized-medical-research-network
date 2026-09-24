@@ -66,6 +66,14 @@ app.include_router(frontend_router)
 
 REPO = Path(__file__).resolve().parents[1]
 
+# FastAPI/Starlette may spool multipart uploads before endpoint code runs.
+# Force Python's process-wide tempfile directory onto verified RAM-backed
+# storage so large medical uploads never spill onto the ordinary disk.
+_SECURE_PLAINTEXT_TMP = secure_plaintext_temp_root()
+for _temp_env in ("TMPDIR", "TMP", "TEMP"):
+    os.environ[_temp_env] = str(_SECURE_PLAINTEXT_TMP)
+tempfile.tempdir = str(_SECURE_PLAINTEXT_TMP)
+
 OPAQUE_DATASET_ID_PATTERN = re.compile(r"^ds-[0-9a-f]{32}$")
 OPAQUE_REQUEST_ID_PATTERN = re.compile(r"^req-[0-9a-f]{32}$")
 DATA_TYPE_PATTERN = re.compile(r"^[A-Z0-9_:-]{1,64}$")
