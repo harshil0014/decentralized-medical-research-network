@@ -23,7 +23,7 @@ researcher_token = "2" * 64
 os.environ["MEDICAL_REGISTRY_AUTH_DIR"] = str(auth)
 os.environ["MEDICAL_REGISTRY_RUNTIME_DIR"] = str(runtime / "runtime")
 os.environ["MEDICAL_KEY_ROOT"] = str(runtime / "keys")
-os.environ["MEDICAL_MASTER_KEY_HEX"] = "ab" * 32
+os.environ["MEDICAL_MASTER_KEY_HEX"] = os.urandom(32).hex()
 os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"] = str(
     runtime / "private-locators.json"
 )
