@@ -64,6 +64,7 @@ def make_slice(
     ds.HighBit = 15
     ds.PixelRepresentation = 1
     ds.BurnedInAnnotation = burned_in
+    ds.RecognizableVisualFeatures = "NO"
     if modality == "CT":
         ds.RescaleSlope = str(slope)
         ds.RescaleIntercept = str(intercept)
@@ -165,7 +166,11 @@ def make_dicom_seg_fixture() -> tuple[bytes, bytes, np.ndarray, str]:
     original_source_sop = str(source.SOPInstanceUID)
     source_clean = source.copy()
     seg_clean = segmentation.copy()
-    deidentify_dataset(source_clean, uid_map={})
+    deidentify_dataset(
+        source_clean,
+        uid_map={},
+        visual_phi_reviewed=True,
+    )
     deidentify_dataset(seg_clean, uid_map={})
 
     for keyword in ("StudyDescription", "SeriesDescription", "ProtocolName"):
