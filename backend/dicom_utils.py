@@ -57,15 +57,42 @@ SENSITIVE_KEYWORDS = [
 ]
 
 
-def _reject_visual_identity_risk(ds: pydicom.Dataset) -> None:
-    if str(getattr(ds, "BurnedInAnnotation", "")).upper() == "YES":
+VISUAL_PHI_REVIEW_MODALITIES = {"CT", "MR"}
+
+
+def _reject_visual_identity_risk(
+    ds: pydicom.Dataset,
+    *,
+    visual_phi_reviewed: bool = False,
+) -> None:
+    burned_in = str(getattr(ds, "BurnedInAnnotation", "")).strip().upper()
+    recognizable = str(
+        getattr(ds, "RecognizableVisualFeatures", "")
+    ).strip().upper()
+    modality = str(getattr(ds, "Modality", "")).strip().upper()
+
+    if burned_in == "YES":
         raise ValueError(
             "DICOM declares burned-in annotation; clean pixel data before upload"
         )
-    if str(getattr(ds, "RecognizableVisualFeatures", "")).upper() == "YES":
+    if recognizable == "YES":
         raise ValueError(
             "DICOM declares recognizable visual features; defacing/cleaning is required"
         )
+
+    if modality in VISUAL_PHI_REVIEW_MODALITIES:
+        if burned_in != "NO":
+            raise ValueError(
+                "CT/MR upload requires BurnedInAnnotation=NO after pixel review"
+            )
+        if recognizable != "NO":
+            raise ValueError(
+                "CT/MR upload requires RecognizableVisualFeatures=NO after visual review"
+            )
+        if not visual_phi_reviewed:
+            raise ValueError(
+                "CT/MR upload requires Hospital visual_phi_reviewed=true attestation"
+            )
 
 
 def _remove_overlay_data(ds: pydicom.Dataset) -> None:
@@ -75,8 +102,16 @@ def _remove_overlay_data(ds: pydicom.Dataset) -> None:
             del ds[tag]
 
 
-def deidentify_dataset(ds: pydicom.Dataset, uid_map: dict[str, str] | None = None) -> None:
-    _reject_visual_identity_risk(ds)
+def deidentify_dataset(
+    ds: pydicom.Dataset,
+    uid_map: dict[str, str] | None = None,
+    *,
+    visual_phi_reviewed: bool = False,
+) -> None:
+    _reject_visual_identity_risk(
+        ds,
+        visual_phi_reviewed=visual_phi_reviewed,
+    )
 
     # Apply the maintained DICOM PS3.15 2024b Basic Application
     # Confidentiality Profile header rule table first. Our stricter
@@ -155,14 +190,21 @@ def deidentify_dataset(ds: pydicom.Dataset, uid_map: dict[str, str] | None = Non
     )
 
 
-def deidentify_dicom_in_place(path: str | Path) -> dict:
+def deidentify_dicom_in_place(
+    path: str | Path,
+    *,
+    visual_phi_reviewed: bool = False,
+) -> dict:
     path = Path(path)
     ds = pydicom.dcmread(path)
 
     if "PixelData" not in ds:
         raise ValueError("DICOM object has no PixelData")
 
-    deidentify_dataset(ds)
+    deidentify_dataset(
+        ds,
+        visual_phi_reviewed=visual_phi_reviewed,
+    )
     ds.save_as(path, enforce_file_format=True)
 
     return {
