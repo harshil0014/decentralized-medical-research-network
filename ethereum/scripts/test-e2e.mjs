@@ -42,7 +42,7 @@ try {
     hospitalContract,
     "registerDataset",
     "patient-alice-diabetes",
-    "LAB_CSV",
+    "CSV",
     metadataCommitment,
     "ACTIVE"
   );
@@ -51,7 +51,7 @@ try {
 }
 assert.equal(semanticDatasetBlocked, true);
 
-await sendTx(hospitalContract, "registerDataset", datasetId, "LAB_CSV", metadataCommitment, "ACTIVE");
+await sendTx(hospitalContract, "registerDataset", datasetId, "CSV", metadataCommitment, "ACTIVE");
 let ds = await hospitalContract.getDataset(datasetId);
 assert.equal(ds.storageState, "PRIVATE_PENDING");
 
@@ -100,7 +100,7 @@ await sendTx(
   requestId,
   "",
   "",
-  "glucose_mg_dl",
+  "CSV:sha256:" + "e".repeat(64),
   4,
   "bafy-ciphertext",
   fakeSha
@@ -127,7 +127,7 @@ await sendTx(
   requestId,
   "",
   "",
-  "glucose_mg_dl",
+  "CSV:sha256:" + "e".repeat(64),
   4,
   "bafy-ciphertext-revoke",
   fakeSha
