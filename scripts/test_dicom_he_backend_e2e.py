@@ -15,6 +15,8 @@ from highdicom.seg.enum import SegmentAlgorithmTypeValues, SegmentationTypeValue
 from pydicom.dataset import Dataset, FileDataset
 from pydicom.sr.coding import Code
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
+from eth_account import Account
+from eth_account.messages import encode_defunct
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -27,16 +29,26 @@ auth.chmod(0o700)
 hospital_token = os.urandom(32).hex()
 researcher_token = os.urandom(32).hex()
 researcher2_token = os.urandom(32).hex()
+researcher_wallet = Account.create()
+researcher2_wallet = Account.create()
 (auth / "hospital_api.token").write_text(hospital_token)
 (auth / "researcher_a.token").write_text(researcher_token)
 (auth / "researcher_b.token").write_text(researcher2_token)
 (auth / "researchers.json").write_text(
     json.dumps(
         {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "researchers": [
-                {"id": "researcher-a", "tokenFile": "researcher_a.token", "walletIndex": 1},
-                {"id": "researcher-b", "tokenFile": "researcher_b.token", "walletIndex": 2},
+                {
+                    "id": "researcher-a",
+                    "tokenFile": "researcher_a.token",
+                    "walletAddress": researcher_wallet.address,
+                },
+                {
+                    "id": "researcher-b",
+                    "tokenFile": "researcher_b.token",
+                    "walletAddress": researcher2_wallet.address,
+                },
             ],
         }
     )
@@ -56,6 +68,9 @@ os.environ["MEDICAL_PLAINTEXT_TMPDIR"] = str(plaintext_ram)
 os.environ["MEDICAL_RECOVERY_BACKUP_PATH"] = str(
     runtime / "external-backup" / "medical-recovery.medrec"
 )
+os.environ["MEDICAL_DATA_BACKUP_DIR"] = str(
+    runtime / "external-data-backup"
+)
 os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"] = str(runtime / "private-locators.json")
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -64,6 +79,48 @@ from backend.app import app  # noqa: E402
 client = TestClient(app)
 hospital = {"Authorization": f"Bearer {hospital_token}"}
 researcher = {"Authorization": f"Bearer {researcher_token}"}
+
+
+def sign_digest(wallet, digest: str) -> str:
+    return Account.sign_message(
+        encode_defunct(hexstr=digest),
+        wallet.key,
+    ).signature.hex()
+
+
+def create_signed_request(headers, wallet, dataset_id: str, purpose: str):
+    prepared = client.post(
+        "/requests/prepare",
+        headers=headers,
+        json={"dataset_id": dataset_id, "purpose": purpose},
+    )
+    assert prepared.status_code == 200, prepared.text
+    body = prepared.json()
+    signature = sign_digest(wallet, body["signingDigest"])
+    return client.post(
+        "/requests",
+        headers=headers,
+        json={
+            "request_id": body["requestId"],
+            "dataset_id": dataset_id,
+            "purpose": purpose,
+            "signature": signature,
+        },
+    )
+
+
+def signed_dicom_compute(job_id: str):
+    prepared = client.get(
+        f"/he/dicom/{job_id}/signing-digest",
+        headers=researcher,
+    )
+    assert prepared.status_code == 200, prepared.text
+    signature = sign_digest(researcher_wallet, prepared.json()["signingDigest"])
+    return client.post(
+        f"/he/dicom/{job_id}/compute",
+        headers=researcher,
+        json={"signature": signature},
+    )
 
 
 def make_ct() -> bytes:
@@ -211,14 +268,11 @@ assert segment_catalog.json()["segment_count"] == 1
 assert segment_catalog.json()["segments"][0]["segment_number"] == 1
 assert segment_catalog.json()["segments"][0]["segment_label"] == "Test ROI"
 
-request = client.post(
-    "/requests",
-    headers=researcher,
-    json={
-        "request_id": request_id,
-        "dataset_id": dataset_id,
-        "purpose": "Encrypted quantitative CT analysis",
-    },
+request = create_signed_request(
+    researcher,
+    researcher_wallet,
+    dataset_id,
+    "Encrypted quantitative CT analysis",
 )
 assert request.status_code == 200, request.text
 request_id = request.json()["requestId"]
@@ -233,14 +287,11 @@ approve = client.post(
 assert approve.status_code == 200, approve.text
 assert approve.json()["status"] == "APPROVED"
 
-seg_request = client.post(
-    "/requests",
-    headers=researcher,
-    json={
-        "request_id": seg_request_id,
-        "dataset_id": seg_dataset_id,
-        "purpose": "Use segmentation mask for encrypted CT analysis",
-    },
+seg_request = create_signed_request(
+    researcher,
+    researcher_wallet,
+    seg_dataset_id,
+    "Use segmentation mask for encrypted CT analysis",
 )
 assert seg_request.status_code == 200, seg_request.text
 seg_request_id = seg_request.json()["requestId"]
@@ -320,10 +371,7 @@ for analysis, reference in references.items():
     assert body["researcher_has_secret_key"] is False
     assert body["ethereum_status"] == "ENCRYPTED"
 
-    computed = client.post(
-        f"/he/dicom/{job_id}/compute",
-        headers=researcher,
-    )
+    computed = signed_dicom_compute(job_id)
     assert computed.status_code == 200, computed.text
     assert computed.json()["result_is_ciphertext"] is True
     assert computed.json()["researcher_has_plaintext_pixels"] is False
@@ -389,10 +437,7 @@ assert roi_body["scope"] == "ROI_BOX"
 assert roi_body["researcher_has_encrypted_raw_voxels"] is True
 roi_job = roi_body["job_id"]
 
-roi_computed = client.post(
-    f"/he/dicom/{roi_job}/compute",
-    headers=researcher,
-)
+roi_computed = signed_dicom_compute(roi_job)
 assert roi_computed.status_code == 200, roi_computed.text
 roi_decrypted = client.post(
     f"/he/dicom/{roi_job}/decrypt",
@@ -429,10 +474,7 @@ assert seg_body["segmentation_dataset_sha256_verified"] is True
 assert seg_body["researcher_has_encrypted_raw_voxels"] is True
 seg_job = seg_body["job_id"]
 
-seg_computed = client.post(
-    f"/he/dicom/{seg_job}/compute",
-    headers=researcher,
-)
+seg_computed = signed_dicom_compute(seg_job)
 assert seg_computed.status_code == 200, seg_computed.text
 seg_decrypted = client.post(
     f"/he/dicom/{seg_job}/decrypt",
@@ -471,10 +513,7 @@ assert block_body["representation"] == "ENCRYPTED_BLOCK_SUFFICIENT_STATISTICS"
 assert block_body["researcher_has_encrypted_raw_voxels"] is False
 block_job = block_body["job_id"]
 
-block_computed = client.post(
-    f"/he/dicom/{block_job}/compute",
-    headers=researcher,
-)
+block_computed = signed_dicom_compute(block_job)
 assert block_computed.status_code == 200, block_computed.text
 block_decrypted = client.post(
     f"/he/dicom/{block_job}/decrypt",
