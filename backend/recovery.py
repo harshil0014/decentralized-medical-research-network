@@ -8,6 +8,11 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from backend.data_backup import (
+    collect_backup_manifest,
+    restore_missing_ipfs_objects,
+)
+
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -170,12 +175,19 @@ def _build_payload() -> dict:
         ).hexdigest(),
     }
 
+    object_backups = collect_backup_manifest()
+    if set(object_backups) != set(locators):
+        raise RuntimeError(
+            "Encrypted-object backup set does not match private locator set"
+        )
+
     return {
         "schemaVersion": 1,
         "createdAt": _utc_now(),
         "ledger": _ledger_fingerprint(),
         "keyFiles": key_files,
         "privateLocators": locators,
+        "objectBackups": object_backups,
         "manifest": manifest,
     }
 
@@ -283,9 +295,14 @@ def _decode_bundle(bundle: bytes) -> dict:
     key_files = payload.get("keyFiles")
     locators = payload.get("privateLocators")
     manifest = payload.get("manifest")
+    object_backups = payload.get("objectBackups")
 
     if not isinstance(key_files, dict) or not isinstance(locators, dict):
         raise ValueError("Recovery bundle content is invalid")
+    if not isinstance(object_backups, dict):
+        raise ValueError("Recovery encrypted-object manifest is missing")
+    if set(object_backups) != set(locators):
+        raise ValueError("Recovery encrypted-object manifest is incomplete")
     if not isinstance(manifest, dict):
         raise ValueError("Recovery bundle manifest is missing")
 
@@ -383,6 +400,11 @@ def restore_recovery_bundle(
         from backend.storage_crypto import load_dataset_key_metadata
         from backend.ethereum_ledger import query
 
+        ipfs_recovery = restore_missing_ipfs_objects(
+            locators,
+            expected_manifest=payload["objectBackups"],
+        )
+
         verified = 0
         for dataset_id in sorted(locators):
             load_dataset_key_metadata(dataset_id)
@@ -425,4 +447,5 @@ def restore_recovery_bundle(
         "restoredKeyFiles": len(targets),
         "restoredPrivateLocators": len(locators),
         "verifiedDatasets": verified,
+        **ipfs_recovery,
     }
