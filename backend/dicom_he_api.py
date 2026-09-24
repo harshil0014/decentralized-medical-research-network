@@ -3,7 +3,13 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from backend.api_auth import require_authenticated, require_hospital, require_researcher
+from backend.api_auth import (
+    AuthIdentity,
+    researcher_org,
+    require_authenticated,
+    require_hospital,
+    require_researcher,
+)
 from backend.runtime_security import require_mutation_lock
 from backend.storage_crypto import decrypt_bytes, is_encrypted_dataset
 from backend.he_service import fetch_ipfs_dataset_bytes, unpin_ipfs, verify_dataset_bytes
