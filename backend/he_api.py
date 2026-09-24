@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 from fastapi import (
@@ -179,11 +180,7 @@ def encrypt_glucose_cohort(
             or ""
         ).upper()
 
-        if data_type not in {
-            "LAB_CSV",
-            "NUMERIC_CSV",
-            "CSV",
-        }:
+        if data_type != "CSV":
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -203,24 +200,17 @@ def encrypt_glucose_cohort(
             dataset["sha256"],
         )
 
-        if is_encrypted_dataset(stored_dataset_bytes):
-            dataset_bytes = decrypt_bytes(
-                payload.dataset_id,
-                stored_dataset_bytes,
+        if not is_encrypted_dataset(stored_dataset_bytes):
+            raise HTTPException(
+                status_code=409,
+                detail="Unencrypted legacy dataset objects are not supported",
             )
 
-            dataset_storage_encryption = (
-                "AES-256-GCM"
-            )
-
-        else:
-            # Compatibility with datasets created before
-            # AES encrypted-at-rest storage existed.
-            dataset_bytes = stored_dataset_bytes
-
-            dataset_storage_encryption = (
-                "LEGACY-PLAINTEXT"
-            )
+        dataset_bytes = decrypt_bytes(
+            payload.dataset_id,
+            stored_dataset_bytes,
+        )
+        dataset_storage_encryption = "AES-256-GCM"
 
         values = extract_numeric_metric_from_csv(
             dataset_bytes,
@@ -250,7 +240,9 @@ def encrypt_glucose_cohort(
                     payload.request_id,
                     "",
                     "",
-                    payload.metric,
+                    "CSV:sha256:" + hashlib.sha256(
+                        payload.metric.strip().encode("utf-8")
+                    ).hexdigest(),
                     str(result["count"]),
                     ciphertext_cid,
                     result[
