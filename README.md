@@ -43,7 +43,7 @@ Homomorphic encryption
 
 No raw medical file, plaintext patient value, AES key, or Microsoft SEAL secret key is written to Ethereum.
 
-User-supplied dataset descriptions and access purposes are committed as SHA-256 values instead of plaintext. DICOM discovery metadata is limited to structural fields (for example modality and dimensions); free-text Study/Series/Protocol descriptions are removed before storage.
+Dataset descriptions and access purposes are always represented on Ethereum as `sha256:<digest>` commitments, and the Solidity contract rejects plaintext values. DICOM free-text Study/Series/Protocol descriptions are removed before encrypted storage.
 
 ## One-shot local setup
 

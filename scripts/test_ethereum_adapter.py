@@ -37,7 +37,7 @@ assert state["network"] == "Ganache"
 
 invoke(
     "RegisterDataset",
-    [dataset_id, "LAB_CSV", "Synthetic adapter test", "ACTIVE"],
+    [dataset_id, "LAB_CSV", "sha256:" + "a" * 64, "ACTIVE"],
     "org1",
 )
 invoke_private_org1(
@@ -60,7 +60,7 @@ assert private_ds["storageState"] == "PRIVATE_READY"
 
 invoke(
     "RequestAccess",
-    [request_id, dataset_id, "Adapter glucose analysis"],
+    [request_id, dataset_id, "sha256:" + "b" * 64],
     "org2",
 )
 invoke("DecideAccess", [request_id, "APPROVED"], "org1")

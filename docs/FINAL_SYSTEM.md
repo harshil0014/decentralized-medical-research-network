@@ -30,8 +30,7 @@ DICOM SEG jobs require **two independently approved grants**: one for the source
 ## Ethereum stores
 
 - dataset ID, type, owner wallet, consent/storage state
-- SHA-256 commitment of arbitrary user-supplied dataset description (non-DICOM)
-- structural DICOM discovery metadata only
+- SHA-256 commitment of the submitted dataset description
 - access request ID and SHA-256 purpose commitment
 - access decisions
 - locator commitment

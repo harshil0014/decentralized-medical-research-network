@@ -5,7 +5,7 @@
 - datasetId — restricted safe identifier; do not encode patient information
 - owner wallet
 - dataType
-- metadataSummary — structural safe metadata or `sha256:<digest>` commitment, never arbitrary plaintext
+- metadataSummary — mandatory `sha256:<digest>` commitment; Solidity rejects plaintext
 - consentState
 - storageState
 - locatorCommitment

@@ -14,8 +14,8 @@
 
 ## Privacy / authorization hardening
 
-- Arbitrary dataset descriptions and research purposes are SHA-256 committed before immutable on-chain storage.
-- Public DICOM metadata excludes free-text Study/Series/Protocol descriptions.
+- Dataset descriptions and research purposes are SHA-256 committed before immutable on-chain storage, and Solidity validates the commitment format.
+- DICOM free-text Study/Series/Protocol descriptions are removed before encrypted storage.
 - DICOM sanitization recursively removes configured identifiers, free-text risk fields, private tags and overlays, remaps identity UIDs, clears risky file-meta fields and zeros the Part 10 preamble.
 - DICOM SEG analysis requires independent authorization for both the source image dataset and SEG dataset.
 - HE compute and Hospital decryption re-check all required active grants and dataset consent.

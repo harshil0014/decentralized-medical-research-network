@@ -26,6 +26,8 @@ const requestId = "REQ-E2E-" + suffix;
 const jobId = "JOB-E2E-" + suffix;
 const fakeSha = "a".repeat(64);
 const fakeResultSha = "b".repeat(64);
+const metadataCommitment = "sha256:" + "c".repeat(64);
+const purposeCommitment = "sha256:" + "d".repeat(64);
 const commitment = ethers.keccak256(ethers.toUtf8Bytes("bafy-demo:" + fakeSha));
 
 const hBalance = await provider.getBalance(await hospital.getAddress());
@@ -33,7 +35,7 @@ const rBalance = await provider.getBalance(await researcher.getAddress());
 assert(hBalance > ethers.parseEther("90"));
 assert(rBalance > ethers.parseEther("90"));
 
-await sendTx(hospitalContract, "registerDataset", datasetId, "LAB_CSV", "Synthetic glucose cohort", "ACTIVE");
+await sendTx(hospitalContract, "registerDataset", datasetId, "LAB_CSV", metadataCommitment, "ACTIVE");
 let ds = await hospitalContract.getDataset(datasetId);
 assert.equal(ds.storageState, "PRIVATE_PENDING");
 
@@ -49,7 +51,7 @@ try {
 }
 assert.equal(unauthorized, true);
 
-await sendTx(researcherContract, "requestAccess", requestId, datasetId, "Glucose analysis");
+await sendTx(researcherContract, "requestAccess", requestId, datasetId, purposeCommitment);
 let req = await hospitalContract.getAccessRequest(requestId);
 assert.equal(req.status, "PENDING");
 

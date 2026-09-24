@@ -304,13 +304,10 @@ def upload_dataset(
                 detail="metadata_summary is required for non-DICOM uploads",
             )
 
-        if suffix.lower() in {".zip", ".dcm", ".dicom"}:
-            ledger_metadata_summary = metadata_summary
-        else:
-            ledger_metadata_summary = _public_text_commitment(
-                metadata_summary,
-                "metadata_summary",
-            )
+        ledger_metadata_summary = _public_text_commitment(
+            metadata_summary,
+            "metadata_summary",
+        )
 
         # Encrypt the final de-identified/validated medical object
         # before it ever enters IPFS.
