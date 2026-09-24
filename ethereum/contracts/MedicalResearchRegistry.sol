@@ -105,6 +105,22 @@ contract MedicalResearchRegistry {
         return (ch >= 0x30 && ch <= 0x39) || (ch >= 0x61 && ch <= 0x66);
     }
 
+    function _validOpaqueId(
+        string memory value,
+        string memory prefixValue
+    ) private pure returns (bool) {
+        bytes memory raw = bytes(value);
+        bytes memory prefix = bytes(prefixValue);
+        if (raw.length != prefix.length + 32) return false;
+        for (uint256 i = 0; i < prefix.length; i++) {
+            if (raw[i] != prefix[i]) return false;
+        }
+        for (uint256 i = prefix.length; i < raw.length; i++) {
+            if (!_isLowerHex(raw[i])) return false;
+        }
+        return true;
+    }
+
     function _validSha256Commitment(string memory value) private pure returns (bool) {
         bytes memory raw = bytes(value);
         if (raw.length != 71) return false;
@@ -139,7 +155,7 @@ contract MedicalResearchRegistry {
         string calldata metadataSummary,
         string calldata consentState
     ) external onlyHospital {
-        require(bytes(datasetId).length > 0, "datasetId required");
+        require(_validOpaqueId(datasetId, "ds-"), "opaque datasetId required");
         require(bytes(dataType).length > 0, "dataType required");
         require(_validSha256Commitment(metadataSummary), "metadata commitment required");
         require(_validConsent(consentState), "invalid consent");
@@ -237,7 +253,7 @@ contract MedicalResearchRegistry {
         string calldata purpose
     ) external {
         require(msg.sender != hospital, "hospital cannot request");
-        require(bytes(requestId).length > 0, "requestId required");
+        require(_validOpaqueId(requestId, "req-"), "opaque requestId required");
         require(_validSha256Commitment(purpose), "purpose commitment required");
         require(!requests[requestId].exists, "request exists");
 
