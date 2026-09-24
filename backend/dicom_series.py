@@ -6,6 +6,7 @@ import tempfile
 import pydicom
 
 from backend.dicom_utils import deidentify_dataset
+from backend.secure_temp import secure_plaintext_temp_root
 
 
 MAX_SERIES_FILES = 5000
@@ -19,7 +20,10 @@ def deidentify_dicom_series_zip(
 ) -> dict:
     path = Path(path)
 
-    with tempfile.TemporaryDirectory() as work:
+    with tempfile.TemporaryDirectory(
+        dir=secure_plaintext_temp_root(),
+        prefix="medical-dicom-series-",
+    ) as work:
         work = Path(work)
         raw_dir = work / "raw"
         clean_dir = work / "clean"
