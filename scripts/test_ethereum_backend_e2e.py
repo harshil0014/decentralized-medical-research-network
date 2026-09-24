@@ -18,6 +18,7 @@ import time
 runtime = Path(tempfile.mkdtemp(prefix="medical-api-e2e-"))
 auth = runtime / "auth"
 auth.mkdir(parents=True)
+auth.chmod(0o700)
 hospital_token = "1" * 64
 researcher_token = "2" * 64
 researcher2_token = "5" * 64
@@ -35,6 +36,9 @@ researcher2_token = "5" * 64
         }
     )
 )
+for credential_path in auth.iterdir():
+    if credential_path.is_file():
+        credential_path.chmod(0o600)
 
 plaintext_ram = Path("/dev/shm") / f"medical-api-e2e-{os.getpid()}"
 plaintext_ram.mkdir(parents=True, exist_ok=True)
