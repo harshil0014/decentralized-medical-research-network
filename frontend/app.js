@@ -3,6 +3,7 @@ const state = {
   role: sessionStorage.getItem("medical_role") || "",
   datasets: [],
   plaintextDownloadsEnabled: false,
+  ethereumAddress: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -45,6 +46,23 @@ function jsonBody(data) {
   };
 }
 
+async function signResearcherDigest(digest) {
+  if (!window.ethereum) {
+    throw new Error("MetaMask or another EIP-1193 wallet is required for researcher actions");
+  }
+  const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+  const account = (accounts?.[0] || "").toLowerCase();
+  const expected = (state.ethereumAddress || "").toLowerCase();
+  if (!account || !expected || account !== expected) {
+    throw new Error("Connected wallet does not match this researcher account");
+  }
+  return window.ethereum.request({
+    method: "personal_sign",
+    params: [digest, accounts[0]],
+  });
+}
+
+
 function button(label, onClick, className = "") {
   const b = document.createElement("button");
   b.textContent = label;
@@ -84,6 +102,7 @@ async function login() {
     const me = await apiJson("/auth/me");
     state.role = me.role;
     state.plaintextDownloadsEnabled = me.plaintextDownloadsEnabled === true;
+    state.ethereumAddress = me.ethereumAddress || "";
     sessionStorage.setItem("medical_token", state.token);
     sessionStorage.setItem("medical_role", state.role);
     openApp();
@@ -99,6 +118,7 @@ function logout() {
   state.token = "";
   state.role = "";
   state.plaintextDownloadsEnabled = false;
+  state.ethereumAddress = "";
   $("appView").classList.add("hidden");
   $("loginView").classList.remove("hidden");
   $("tokenInput").value = "";
@@ -291,14 +311,24 @@ function buildResearchRequestCard() {
     event.preventDefault();
     const fd = new FormData(form);
     try {
-      const data = await apiJson("/requests", {
+      const prepared = await apiJson("/requests/prepare", {
         method: "POST",
         ...jsonBody({
           dataset_id: fd.get("dataset_id"),
           purpose: fd.get("purpose"),
         }),
       });
-      $("requestLookupId").value = data.requestId || requestId;
+      const signature = await signResearcherDigest(prepared.signingDigest);
+      const data = await apiJson("/requests", {
+        method: "POST",
+        ...jsonBody({
+          request_id: prepared.requestId,
+          dataset_id: fd.get("dataset_id"),
+          purpose: fd.get("purpose"),
+          signature,
+        }),
+      });
+      $("requestLookupId").value = data.requestId;
       $("requestOutput").textContent = JSON.stringify(data, null, 2);
       showToast("Request created");
     } catch (error) {
@@ -494,7 +524,14 @@ function buildComputeCard() {
     const id = input.value.trim();
     if (!id) return;
     try {
-      const data = await apiJson(`/he/glucose/${encodeURIComponent(id)}/compute-average`, { method: "POST" });
+      const signing = await apiJson(
+        `/he/glucose/${encodeURIComponent(id)}/signing-digest`,
+      );
+      const signature = await signResearcherDigest(signing.signingDigest);
+      const data = await apiJson(
+        `/he/glucose/${encodeURIComponent(id)}/compute-average`,
+        { method: "POST", ...jsonBody({ signature }) },
+      );
       $("computeOutput").textContent = JSON.stringify(data, null, 2);
       $("heLookupJobId").value = id;
     } catch (error) { showToast(error.message); }
@@ -723,8 +760,13 @@ function buildDicomComputeCard() {
     const id = input.value.trim();
     if (!id) return;
     try {
+      const signing = await apiJson(
+        `/he/dicom/${encodeURIComponent(id)}/signing-digest`,
+      );
+      const signature = await signResearcherDigest(signing.signingDigest);
       const data = await apiJson(`/he/dicom/${encodeURIComponent(id)}/compute`, {
         method: "POST",
+        ...jsonBody({ signature }),
       });
       $("dicomComputeOutput").textContent = JSON.stringify(data, null, 2);
       const lookup = $("dicomHeLookupJobId");
@@ -797,6 +839,8 @@ document.querySelectorAll(".nav-button").forEach((buttonEl) => {
   try {
     const me = await apiJson("/auth/me");
     state.role = me.role;
+    state.ethereumAddress = me.ethereumAddress || "";
+    state.plaintextDownloadsEnabled = me.plaintextDownloadsEnabled === true;
     sessionStorage.setItem("medical_role", state.role);
     openApp();
   } catch (_) {
