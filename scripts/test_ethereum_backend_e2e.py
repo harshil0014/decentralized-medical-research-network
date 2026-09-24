@@ -96,6 +96,15 @@ approve = client.post(
 assert approve.status_code == 200, approve.text
 assert approve.json()["status"] == "APPROVED"
 
+download_blocked = client.get(
+    f"/requests/{request_id}/download",
+    headers=researcher,
+)
+assert download_blocked.status_code == 403, download_blocked.text
+assert "disabled by default" in download_blocked.json()["detail"]
+
+# Plaintext release is an explicit controlled-demo escape hatch, never default.
+os.environ["MEDICAL_ALLOW_PLAINTEXT_DOWNLOADS"] = "true"
 download = client.get(
     f"/requests/{request_id}/download",
     headers=researcher,
@@ -104,6 +113,7 @@ assert download.status_code == 200, download.text
 assert download.content == csv_bytes
 assert download.headers["x-ipfs-sha256-verified"] == "true"
 assert download.headers["x-storage-encryption"] == "AES-256-GCM"
+del os.environ["MEDICAL_ALLOW_PLAINTEXT_DOWNLOADS"]
 
 rotate = client.post(
     f"/datasets/{dataset_id}/rotate-key",
