@@ -12,7 +12,11 @@ MAX_SERIES_FILES = 5000
 MAX_SERIES_BYTES = 2 * 1024 * 1024 * 1024
 
 
-def deidentify_dicom_series_zip(path: str | Path) -> dict:
+def deidentify_dicom_series_zip(
+    path: str | Path,
+    *,
+    visual_phi_reviewed: bool = False,
+) -> dict:
     path = Path(path)
 
     with tempfile.TemporaryDirectory() as work:
@@ -79,7 +83,11 @@ def deidentify_dicom_series_zip(path: str | Path) -> dict:
             if columns is None:
                 columns = getattr(ds, "Columns", None)
 
-            deidentify_dataset(ds, uid_map=uid_map)
+            deidentify_dataset(
+                ds,
+                uid_map=uid_map,
+                visual_phi_reviewed=visual_phi_reviewed,
+            )
 
             dst = clean_dir / f"slice_{len(cleaned) + 1:05d}.dcm"
             ds.save_as(dst, enforce_file_format=True)
