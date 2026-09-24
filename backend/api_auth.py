@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import re
+import stat
 
 from fastapi import Depends, Header, HTTPException
 
@@ -28,6 +29,19 @@ RESEARCHER_REGISTRY_PATH = Path(
 _RESEARCHER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
+def _assert_private_path(path: Path, *, directory: bool = False) -> None:
+    if os.name != "posix":
+        return
+
+    mode = stat.S_IMODE(path.stat().st_mode)
+    forbidden = 0o077
+    if mode & forbidden:
+        kind = "directory" if directory else "file"
+        raise RuntimeError(
+            f"Authentication {kind} permissions are too broad: {path}"
+        )
+
+
 @dataclass(frozen=True)
 class AuthIdentity:
     role: str
@@ -44,6 +58,7 @@ class _ResearcherCredential:
 
 def _load_token(path: Path) -> str:
     try:
+        _assert_private_path(path)
         token = path.read_text(encoding="utf-8").strip()
     except FileNotFoundError as exc:
         raise RuntimeError(
@@ -80,6 +95,8 @@ def _resolve_token_file(raw: str) -> Path:
 
 def _load_researchers() -> tuple[_ResearcherCredential, ...]:
     try:
+        _assert_private_path(AUTH_ROOT, directory=True)
+        _assert_private_path(RESEARCHER_REGISTRY_PATH)
         payload = json.loads(
             RESEARCHER_REGISTRY_PATH.read_text(encoding="utf-8")
         )
@@ -140,6 +157,7 @@ def _load_researchers() -> tuple[_ResearcherCredential, ...]:
     return tuple(credentials)
 
 
+_assert_private_path(AUTH_ROOT, directory=True)
 _HOSPITAL_TOKEN = _load_token(HOSPITAL_TOKEN_PATH)
 _RESEARCHERS = _load_researchers()
 
