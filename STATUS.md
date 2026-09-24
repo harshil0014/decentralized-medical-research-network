@@ -1,38 +1,35 @@
-# Build status — Ethereum / Solidity / Ganache migration
+# Build status — Ethereum / Solidity / Ganache
 
 ## Active implementation
 
 - Ethereum-compatible local ledger: Ganache
-- Solidity governance contract
-- 100 test ETH per local Ganache account
+- Solidity governance and audit contract
 - Hospital = local account 0
 - Researcher = local account 1
-- FastAPI service-token roles preserved
-- AES-256-GCM encrypted datasets preserved
-- IPFS encrypted storage preserved
-- Microsoft SEAL CKKS Average preserved
-- Microsoft SEAL CKKS SUM preserved
-- DICOM utilities preserved
+- FastAPI service-token roles
+- AES-256-GCM encrypted datasets in IPFS
+- Hospital-local CID/SHA locator metadata with Ethereum commitment
+- Microsoft SEAL 4.4 CKKS Average/SUM and DICOM statistics
+- CT/MR DICOM ROI, slice, raw-voxel, block-statistics and DICOM SEG analysis
 
-## Fabric replacement
+## Privacy / authorization hardening
 
-The active backend no longer invokes Fabric peer CLI commands. Existing API endpoints call `backend.ethereum_ledger`, which translates the previous governance operations into Solidity transactions and queries.
+- Arbitrary dataset descriptions and research purposes are SHA-256 committed before immutable on-chain storage.
+- Public DICOM metadata excludes free-text Study/Series/Protocol descriptions.
+- DICOM sanitization recursively removes configured identifiers, free-text risk fields, private tags and overlays, remaps identity UIDs, clears risky file-meta fields and zeros the Part 10 preamble.
+- DICOM SEG analysis requires independent authorization for both the source image dataset and SEG dataset.
+- HE compute and Hospital decryption re-check all required active grants and dataset consent.
 
-Because Ethereum does not provide Fabric implicit private collections, the encrypted object's CID and SHA-256 are kept in a Hospital-local private metadata store. Solidity stores only a cryptographic commitment to that locator.
+## Important boundaries
 
-## Automated validation
+This remains a research prototype:
+- one privileged Hospital wallet and one mapped Researcher wallet
+- service tokens instead of per-person OIDC/wallet identities
+- local Ganache rather than a public/consortium production network
+- local key files rather than KMS/HSM
+- DICOM sanitization is not a full PS3.15 compliance implementation
+- key rotation does not retroactively re-encrypt existing IPFS ciphertext
 
-`.github/workflows/ethereum-e2e.yml` runs:
+## Validation
 
-1. Ganache boot with 100 test ETH/account
-2. Solidity compile
-3. contract deployment
-4. Solidity contract E2E
-5. Python Ethereum adapter E2E
-6. local IPFS
-7. Microsoft SEAL 4.4 build
-8. project HE binary build
-9. DICOM regression
-10. full FastAPI + Ganache + IPFS + AES + HE Average/SUM E2E
-
-See the latest workflow run on the migration branch for the authoritative PASS/FAIL result.
+GitHub Actions runs Solidity, Python adapter, IPFS, Microsoft SEAL, DICOM regression and full FastAPI E2E tests on every PR/push to main. The active DICOM work is tracked by PR #1.

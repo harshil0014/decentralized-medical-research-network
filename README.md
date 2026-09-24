@@ -11,7 +11,7 @@ The active governance layer is:
 - **Ganache** local development network
 - **10 deterministic local accounts with 100 test ETH each**
 
-Hyperledger Fabric is no longer required by the active runtime on this migration branch.
+Hyperledger Fabric is not used by the active runtime. Historical Fabric-era source remains only for migration/reference and must not be treated as an active security boundary.
 
 ## System flow
 
@@ -42,6 +42,8 @@ Homomorphic encryption
 ```
 
 No raw medical file, plaintext patient value, AES key, or Microsoft SEAL secret key is written to Ethereum.
+
+User-supplied dataset descriptions and access purposes are committed as SHA-256 values instead of plaintext. DICOM discovery metadata is limited to structural fields (for example modality and dimensions); free-text Study/Series/Protocol descriptions are removed before storage.
 
 ## One-shot local setup
 
@@ -84,7 +86,7 @@ docker volume create medical-ipfs-data
 docker run -d --name medical-ipfs \
   -v medical-ipfs-data:/data/ipfs \
   -p 127.0.0.1:5001:5001 \
-  ipfs/kubo:latest
+  ipfs/kubo:v0.43.1
 ```
 
 Create API tokens and localhost TLS exactly as before, then start:
@@ -178,3 +180,16 @@ The GitHub Actions workflow `.github/workflows/ethereum-e2e.yml` executes the sa
 ## Safety / scope
 
 This is a research prototype, not production clinical infrastructure. Use only synthetic or properly de-identified data. It does not claim HIPAA, GDPR, DPDP, or hospital-production compliance.
+
+
+## Authorization invariants
+
+- Every HE job is tied to an approved primary dataset request.
+- DICOM SEG analysis additionally requires a separate approved request for the SEG dataset.
+- The primary and secondary requests must belong to the same researcher wallet.
+- Consent/access is re-checked before researcher computation **and again before Hospital decryption**.
+- Revoking either required grant blocks further computation/decryption.
+
+## Key rotation semantics
+
+Dataset key rotation creates a new active AES key generation for future encrypted objects while retaining historical generations as DECRYPT_ONLY so existing immutable IPFS ciphertext remains readable. It is **version rotation**, not retroactive re-encryption. If an old key is suspected compromised, the affected ciphertext must be re-encrypted and republished under a new dataset/version; rotating metadata alone does not remediate historical ciphertext.

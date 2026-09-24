@@ -44,7 +44,7 @@ jobs:
             --user 0 \
             -p 127.0.0.1:5001:5001 \
             --entrypoint sh \
-            ipfs/kubo:latest \
+            ipfs/kubo:v0.43.1 \
             -c 'export IPFS_PATH=/data/ipfs; mkdir -p "$IPFS_PATH"; ipfs init; ipfs config Addresses.API /ip4/0.0.0.0/tcp/5001; exec ipfs daemon --offline'
           for i in $(seq 1 180); do
             if docker logs medical-ipfs 2>&1 | grep -q "Daemon is ready"; then

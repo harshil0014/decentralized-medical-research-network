@@ -6,7 +6,7 @@ command -v node >/dev/null
 command -v npm >/dev/null
 command -v curl >/dev/null
 
-npm install --prefix ethereum
+npm ci --prefix ethereum
 
 pkill -f "node.*ganache" 2>/dev/null || true
 pkill -f "ganache.*8545" 2>/dev/null || true
