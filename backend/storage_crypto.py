@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from cryptography.hazmat.primitives.ciphers import (
     algorithms,
     modes,
 )
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 MAGIC_V1 = b"MEDAES01"
@@ -35,6 +37,186 @@ NONCE_SIZE = 12
 TAG_SIZE = 16
 KEY_SIZE = 32
 CHUNK_SIZE = 1024 * 1024
+
+KEY_BLOB_MAGIC = b"MEDKEY01"
+KEY_WRAP_NONCE_SIZE = 12
+
+
+def _master_key() -> bytes:
+    raw = os.environ.get(
+        "MEDICAL_MASTER_KEY_HEX",
+        "",
+    ).strip().lower()
+
+    if len(raw) != 64:
+        raise RuntimeError(
+            "MEDICAL_MASTER_KEY_HEX must provide a 32-byte external wrapping key"
+        )
+
+    try:
+        key = bytes.fromhex(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            "MEDICAL_MASTER_KEY_HEX must be exactly 64 hexadecimal characters"
+        ) from exc
+
+    if len(key) != KEY_SIZE:
+        raise RuntimeError(
+            "MEDICAL_MASTER_KEY_HEX must provide a 32-byte external wrapping key"
+        )
+
+    return key
+
+
+def _assert_private_file(path: Path) -> None:
+    if os.name != "posix":
+        return
+
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        raise RuntimeError(
+            f"Dataset key file permissions are too broad: {path}"
+        )
+
+
+def _key_wrap_aad(dataset_id: str, key_version: int) -> bytes:
+    return (
+        KEY_BLOB_MAGIC
+        + struct.pack(">I", key_version)
+        + hashlib.sha256(dataset_id.encode("utf-8")).digest()
+    )
+
+
+def _wrap_dataset_key(
+    dataset_id: str,
+    key_version: int,
+    key: bytes,
+) -> bytes:
+    if len(key) != KEY_SIZE:
+        raise RuntimeError("Dataset key material is invalid")
+
+    nonce = os.urandom(KEY_WRAP_NONCE_SIZE)
+    ciphertext = AESGCM(_master_key()).encrypt(
+        nonce,
+        key,
+        _key_wrap_aad(dataset_id, key_version),
+    )
+    return KEY_BLOB_MAGIC + nonce + ciphertext
+
+
+def _atomic_replace_bytes(path: Path, payload: bytes) -> None:
+    temporary = path.with_name(
+        "."
+        + path.name
+        + "."
+        + str(os.getpid())
+        + "."
+        + os.urandom(6).hex()
+        + ".tmp"
+    )
+
+    fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary, path)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    except Exception:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _create_wrapped_key_file(
+    path: Path,
+    dataset_id: str,
+    key_version: int,
+    key: bytes,
+) -> None:
+    payload = _wrap_dataset_key(dataset_id, key_version, key)
+    fd = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _load_key_material(
+    path: Path,
+    dataset_id: str,
+    key_version: int,
+) -> bytes:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Hospital dataset encryption key version {key_version} not found"
+        )
+
+    _assert_private_file(path)
+    payload = path.read_bytes()
+
+    if payload.startswith(KEY_BLOB_MAGIC):
+        minimum = len(KEY_BLOB_MAGIC) + KEY_WRAP_NONCE_SIZE + 16
+        if len(payload) < minimum:
+            raise RuntimeError("Wrapped dataset key file is truncated")
+
+        start = len(KEY_BLOB_MAGIC)
+        nonce = payload[start:start + KEY_WRAP_NONCE_SIZE]
+        ciphertext = payload[start + KEY_WRAP_NONCE_SIZE:]
+
+        try:
+            key = AESGCM(_master_key()).decrypt(
+                nonce,
+                ciphertext,
+                _key_wrap_aad(dataset_id, key_version),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Dataset key unwrap failed; master key is missing or incorrect"
+            ) from exc
+
+        if len(key) != KEY_SIZE:
+            raise RuntimeError("Unwrapped dataset key is invalid")
+
+        return key
+
+    # One-time migration path for historical raw 32-byte key files.
+    if len(payload) == KEY_SIZE:
+        wrapped = _wrap_dataset_key(
+            dataset_id,
+            key_version,
+            payload,
+        )
+        _atomic_replace_bytes(path, wrapped)
+        return payload
+
+    raise RuntimeError(
+        f"Stored dataset key version {key_version} is invalid"
+    )
 
 
 def _key_root() -> Path:
@@ -205,6 +387,7 @@ def _build_key_metadata(
             )
         ).hexdigest(),
         "algorithm": "AES-256-GCM",
+        "keyProtection": "AES-256-GCM-WRAPPED",
 
         # Compatibility alias for older code.
         "keyVersion": active_version,
@@ -569,13 +752,13 @@ def load_dataset_key_metadata(
                 f"{version} is missing"
             )
 
-        key_bytes = (
-            key_path.read_bytes()
+        key_bytes = _load_key_material(
+            key_path,
+            dataset_id,
+            version,
         )
 
-        if len(
-            key_bytes
-        ) != KEY_SIZE:
+        if len(key_bytes) != KEY_SIZE:
             raise RuntimeError(
                 "Stored dataset key version "
                 f"{version} is invalid"
@@ -684,35 +867,12 @@ def get_or_create_dataset_key(
         KEY_SIZE
     )
 
-    fd = os.open(
+    _create_wrapped_key_file(
         path,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL,
-        0o600,
+        dataset_id,
+        version,
+        key,
     )
-
-    try:
-        with os.fdopen(
-            fd,
-            "wb",
-        ) as f:
-            f.write(
-                key
-            )
-
-            f.flush()
-            os.fsync(
-                f.fileno()
-            )
-
-    except Exception:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-
-        raise
 
     try:
         _write_key_metadata(
@@ -784,15 +944,11 @@ def load_dataset_key(
             f"version {key_version} not found"
         )
 
-    key = path.read_bytes()
-
-    if len(key) != KEY_SIZE:
-        raise RuntimeError(
-            "Stored dataset key version "
-            f"{key_version} is invalid"
-        )
-
-    return key
+    return _load_key_material(
+        path,
+        dataset_id,
+        key_version,
+    )
 
 
 def rotate_dataset_key(
@@ -831,35 +987,12 @@ def rotate_dataset_key(
         KEY_SIZE
     )
 
-    fd = os.open(
+    _create_wrapped_key_file(
         new_path,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL,
-        0o600,
+        dataset_id,
+        new_version,
+        new_key,
     )
-
-    try:
-        with os.fdopen(
-            fd,
-            "wb",
-        ) as f:
-            f.write(
-                new_key
-            )
-
-            f.flush()
-            os.fsync(
-                f.fileno()
-            )
-
-    except Exception:
-        try:
-            new_path.unlink()
-        except FileNotFoundError:
-            pass
-
-        raise
 
     updated = json.loads(
         json.dumps(
