@@ -101,6 +101,10 @@ contract MedicalResearchRegistry {
         return _eq(value, "ACTIVE") || _eq(value, "RESTRICTED") || _eq(value, "REVOKED");
     }
 
+    function _validPublicDataType(string memory value) private pure returns (bool) {
+        return _eq(value, "CSV") || _eq(value, "DICOM") || _eq(value, "DICOM_SEG");
+    }
+
     function _isLowerHex(bytes1 ch) private pure returns (bool) {
         return (ch >= 0x30 && ch <= 0x39) || (ch >= 0x61 && ch <= 0x66);
     }
@@ -134,6 +138,29 @@ contract MedicalResearchRegistry {
         return true;
     }
 
+    function _validHEMetricDescriptor(string memory value) private pure returns (bool) {
+        bytes memory raw = bytes(value);
+        bytes memory csvPrefix = bytes("CSV:sha256:");
+        bytes memory dicomPrefix = bytes("DICOM:sha256:");
+        bytes memory prefix;
+
+        if (raw.length == csvPrefix.length + 64) {
+            prefix = csvPrefix;
+        } else if (raw.length == dicomPrefix.length + 64) {
+            prefix = dicomPrefix;
+        } else {
+            return false;
+        }
+
+        for (uint256 i = 0; i < prefix.length; i++) {
+            if (raw[i] != prefix[i]) return false;
+        }
+        for (uint256 i = prefix.length; i < raw.length; i++) {
+            if (!_isLowerHex(raw[i])) return false;
+        }
+        return true;
+    }
+
     function _pushDatasetHistory(string memory datasetId) private {
         Dataset memory snapshot = datasets[datasetId];
         datasetHistory[datasetId].push(snapshot);
@@ -156,7 +183,7 @@ contract MedicalResearchRegistry {
         string calldata consentState
     ) external onlyHospital {
         require(_validOpaqueId(datasetId, "ds-"), "opaque datasetId required");
-        require(bytes(dataType).length > 0, "dataType required");
+        require(_validPublicDataType(dataType), "invalid public dataType");
         require(_validSha256Commitment(metadataSummary), "metadata commitment required");
         require(_validConsent(consentState), "invalid consent");
         require(!datasets[datasetId].exists, "dataset exists");
@@ -367,6 +394,7 @@ contract MedicalResearchRegistry {
         require(!heJobs[jobId].exists, "HE job exists");
         require(bytes(jobId).length > 0, "jobId required");
         require(cohortSize > 0, "cohort size required");
+        require(_validHEMetricDescriptor(metric), "invalid HE metric descriptor");
 
         AccessRequest storage req = requests[requestId];
         require(req.exists, "request missing");
