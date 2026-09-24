@@ -263,7 +263,11 @@ def make_multislice_dicom_seg_fixture() -> tuple[bytes, bytes, np.ndarray]:
     with zipfile.ZipFile(source_zip, "w", zipfile.ZIP_DEFLATED) as archive:
         for index, source in enumerate(sources, start=1):
             cleaned = source.copy()
-            deidentify_dataset(cleaned, uid_map=source_uid_map)
+            deidentify_dataset(
+                cleaned,
+                uid_map=source_uid_map,
+                visual_phi_reviewed=True,
+            )
             stream = io.BytesIO()
             cleaned.save_as(stream, enforce_file_format=True)
             archive.writestr(f"slice_{index:04d}.dcm", stream.getvalue())
