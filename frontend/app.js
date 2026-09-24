@@ -159,7 +159,7 @@ function buildUploadCard() {
   const form = document.createElement("form");
   form.className = "form-grid";
   form.innerHTML = `
-    <input name="dataset_id" placeholder="Dataset ID" required>
+    <input name="dataset_id" placeholder="Local dataset label (never written on-chain)" required>
     <input name="data_type" placeholder="Data type" value="LAB_CSV" required>
     <input class="full" name="metadata_summary" placeholder="Metadata" required>
     <select name="consent_state"><option>ACTIVE</option><option>REVOKED</option></select>
@@ -282,8 +282,7 @@ function buildResearchRequestCard() {
   const form = document.createElement("form");
   form.className = "form-grid";
   form.innerHTML = `
-    <input id="requestDatasetId" name="dataset_id" placeholder="Dataset ID" required>
-    <input name="request_id" placeholder="Request ID">
+    <input id="requestDatasetId" name="dataset_id" placeholder="Opaque Dataset ID" required>
     <input class="full" name="purpose" placeholder="Purpose" required>
     <div class="full form-actions"><button class="primary" type="submit">Create</button></div>
   `;
@@ -291,12 +290,10 @@ function buildResearchRequestCard() {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const fd = new FormData(form);
-    const requestId = fd.get("request_id") || `REQ-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
     try {
       const data = await apiJson("/requests", {
         method: "POST",
         ...jsonBody({
-          request_id: requestId,
           dataset_id: fd.get("dataset_id"),
           purpose: fd.get("purpose"),
         }),
