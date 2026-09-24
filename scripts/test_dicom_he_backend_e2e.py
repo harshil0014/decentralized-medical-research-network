@@ -23,6 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 runtime = Path(tempfile.mkdtemp(prefix="medical-dicom-he-e2e-"))
 auth = runtime / "auth"
 auth.mkdir(parents=True)
+auth.chmod(0o700)
 hospital_token = os.urandom(32).hex()
 researcher_token = os.urandom(32).hex()
 researcher2_token = os.urandom(32).hex()
@@ -40,6 +41,9 @@ researcher2_token = os.urandom(32).hex()
         }
     )
 )
+for credential_path in auth.iterdir():
+    if credential_path.is_file():
+        credential_path.chmod(0o600)
 
 plaintext_ram = Path("/dev/shm") / f"medical-dicom-e2e-{os.getpid()}"
 plaintext_ram.mkdir(parents=True, exist_ok=True)
