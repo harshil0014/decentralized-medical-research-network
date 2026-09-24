@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import tempfile
@@ -22,15 +23,32 @@ if str(REPO_ROOT) not in sys.path:
 runtime = Path(tempfile.mkdtemp(prefix="medical-dicom-he-e2e-"))
 auth = runtime / "auth"
 auth.mkdir(parents=True)
-hospital_token = "3" * 64
-researcher_token = "4" * 64
+hospital_token = os.urandom(32).hex()
+researcher_token = os.urandom(32).hex()
+researcher2_token = os.urandom(32).hex()
 (auth / "hospital_api.token").write_text(hospital_token)
-(auth / "researcher_api.token").write_text(researcher_token)
+(auth / "researcher_a.token").write_text(researcher_token)
+(auth / "researcher_b.token").write_text(researcher2_token)
+(auth / "researchers.json").write_text(
+    json.dumps(
+        {
+            "schemaVersion": 1,
+            "researchers": [
+                {"id": "researcher-a", "tokenFile": "researcher_a.token", "walletIndex": 1},
+                {"id": "researcher-b", "tokenFile": "researcher_b.token", "walletIndex": 2},
+            ],
+        }
+    )
+)
+
+plaintext_ram = Path("/dev/shm") / f"medical-dicom-e2e-{os.getpid()}"
+plaintext_ram.mkdir(parents=True, exist_ok=True)
 
 os.environ["MEDICAL_REGISTRY_AUTH_DIR"] = str(auth)
 os.environ["MEDICAL_REGISTRY_RUNTIME_DIR"] = str(runtime / "runtime")
 os.environ["MEDICAL_KEY_ROOT"] = str(runtime / "keys")
 os.environ["MEDICAL_MASTER_KEY_HEX"] = os.urandom(32).hex()
+os.environ["MEDICAL_PLAINTEXT_TMPDIR"] = str(plaintext_ram)
 os.environ["MEDICAL_ETHEREUM_PRIVATE_LOCATORS"] = str(runtime / "private-locators.json")
 
 from fastapi.testclient import TestClient  # noqa: E402
