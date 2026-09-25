@@ -169,6 +169,9 @@ assert me1.status_code == 200 and me2.status_code == 200
 assert me1.json()["researcherId"] == "researcher-a"
 assert me2.json()["researcherId"] == "researcher-b"
 assert me1.json()["ethereumAddress"].lower() != me2.json()["ethereumAddress"].lower()
+assert me1.json()["ethereumChainId"] == json.loads(
+    (REPO_ROOT / "ethereum/deployment.json").read_text()
+)["chainId"]
 assert health.json() == {"status": "ok"}
 diagnostics_denied = client.get("/admin/diagnostics")
 assert diagnostics_denied.status_code in (401, 403)
@@ -423,6 +426,15 @@ restored_preview = client.get(
 )
 assert restored_preview.status_code == 200, restored_preview.text
 assert "glucose_mg_dl" in restored_preview.json()["columns"]
+
+with patch("backend.he_api._ledger_query", side_effect=RuntimeError("PRIVATE-TOKEN-EXPOSURE")):
+    sanitized_error = client.post(
+        "/he/glucose/encrypt", headers=hospital,
+        json={"dataset_id": dataset_id, "request_id": request_id,
+              "metric": "glucose_mg_dl"},
+    )
+assert sanitized_error.status_code == 503
+assert "PRIVATE-TOKEN-EXPOSURE" not in sanitized_error.text
 
 he_create = client.post(
     "/he/glucose/encrypt",

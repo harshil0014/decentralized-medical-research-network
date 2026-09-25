@@ -344,15 +344,13 @@ def encrypt_glucose_cohort(
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=404,
-            detail=str(exc),
+            detail="Required HE artifact is unavailable",
         ) from exc
 
     except Exception as exc:
         raise HTTPException(
-            status_code=500,
-            detail=(
-                f"IPFS-backed HE encryption failed: {exc}"
-            ),
+            status_code=503,
+            detail="HE encryption failed; check job state and Hospital diagnostics before retrying",
         ) from exc
 
 
@@ -570,15 +568,13 @@ def compute_average(
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=404,
-            detail=str(exc),
+            detail="Required HE artifact is unavailable",
         ) from exc
 
     except Exception as exc:
         raise HTTPException(
-            status_code=500,
-            detail=(
-                f"IPFS-backed HE computation failed: {exc}"
-            ),
+            status_code=503,
+            detail="HE computation failed; check job state and Hospital diagnostics before retrying",
         ) from exc
 
 
@@ -715,15 +711,13 @@ def decrypt_he_average(
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=404,
-            detail=str(exc),
+            detail="Required HE artifact is unavailable",
         ) from exc
 
     except Exception as exc:
         raise HTTPException(
-            status_code=500,
-            detail=(
-                f"IPFS-backed HE decryption failed: {exc}"
-            ),
+            status_code=503,
+            detail="HE decryption failed; check job state and Hospital diagnostics before retrying",
         ) from exc
 
 

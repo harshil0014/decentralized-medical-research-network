@@ -322,7 +322,7 @@ def encrypt_dicom(payload: DicomHEInput):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Required DICOM artifact is unavailable") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="DICOM HE encryption failed") from exc
 
@@ -354,7 +354,7 @@ def inspect_dicom_seg(dataset_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Required DICOM artifact is unavailable") from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -466,7 +466,7 @@ def compute_dicom(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Required DICOM artifact is unavailable") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="DICOM HE computation failed; inspect job state before retrying") from exc
 
@@ -522,7 +522,7 @@ def decrypt_dicom(job_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Required DICOM artifact is unavailable") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="DICOM HE decryption failed; inspect job state before retrying") from exc
 

@@ -62,7 +62,7 @@ contract MedicalResearchRegistry {
     }
 
     mapping(string => Dataset) private datasets;
-    mapping(string => bool) private datasetSeen;
+    mapping(string => uint256) private datasetIndexPlusOne;
     string[] private datasetIds;
     mapping(string => Dataset[]) private datasetHistory;
 
@@ -288,10 +288,8 @@ contract MedicalResearchRegistry {
             exists: true
         });
 
-        if (!datasetSeen[datasetId]) {
-            datasetSeen[datasetId] = true;
-            datasetIds.push(datasetId);
-        }
+        datasetIds.push(datasetId);
+        datasetIndexPlusOne[datasetId] = datasetIds.length;
 
         _pushDatasetHistory(datasetId);
         emit DatasetRegistered(datasetId, msg.sender);
@@ -315,6 +313,15 @@ contract MedicalResearchRegistry {
         Dataset storage ds = datasets[datasetId];
         require(ds.exists, "dataset missing");
         require(_eq(ds.storageState, "PRIVATE_PENDING"), "dataset not pending");
+        uint256 index = datasetIndexPlusOne[datasetId] - 1;
+        uint256 last = datasetIds.length - 1;
+        if (index != last) {
+            string memory movedId = datasetIds[last];
+            datasetIds[index] = movedId;
+            datasetIndexPlusOne[movedId] = index + 1;
+        }
+        datasetIds.pop();
+        delete datasetIndexPlusOne[datasetId];
         delete datasets[datasetId];
     }
 

@@ -207,7 +207,7 @@ def compute_sum(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Required HE artifact is unavailable") from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -293,7 +293,7 @@ def decrypt_he_sum(job_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Required HE artifact is unavailable") from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,

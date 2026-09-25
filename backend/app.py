@@ -173,6 +173,7 @@ def _public_request_record(raw: str):
 
 from backend.ethereum_ledger import (
     account_address as ethereum_account_address,
+    deployment_chain_id as ethereum_deployment_chain_id,
     health as ethereum_health,
     invoke as ethereum_invoke,
     invoke_private_org1 as ethereum_invoke_private_org1,
@@ -227,6 +228,7 @@ def auth_me(
         org = researcher_org(identity)
         result["researcherId"] = identity.researcher_id
         result["ethereumAddress"] = ethereum_account_address(org)
+        result["ethereumChainId"] = ethereum_deployment_chain_id()
 
     return result
 

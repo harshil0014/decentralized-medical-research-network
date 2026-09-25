@@ -1,11 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { ethers } from "ethers";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const root = path.resolve(here, "..");
 const abi = JSON.parse(fs.readFileSync(path.join(root, "build", "MedicalResearchRegistry.abi.json"), "utf8"));
 const bytecode = fs.readFileSync(path.join(root, "build", "MedicalResearchRegistry.bytecode.txt"), "utf8").trim();
+const sourceSha256 = createHash("sha256").update(
+  fs.readFileSync(path.join(root, "contracts", "MedicalResearchRegistry.sol")),
+).digest("hex");
 const rpcUrl = process.env.ETH_RPC_URL || "http://127.0.0.1:8545";
 
 const provider = new ethers.JsonRpcProvider(rpcUrl);
@@ -35,6 +39,7 @@ const deployment = {
   hospitalAddress: await hospital.getAddress(),
   researcherSigning: "external-eip191",
   deployedBlock: receipt.blockNumber,
+  sourceSha256,
   abiPath: "ethereum/build/MedicalResearchRegistry.abi.json"
 };
 

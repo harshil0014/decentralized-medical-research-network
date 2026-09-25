@@ -33,6 +33,11 @@ if [ "$FRESH" -eq 1 ]; then
   MEDICAL_REGISTRY_AUTH_DIR="$AUTH" node ethereum/scripts/generate-qbft-config.mjs "$QBFT"
 fi
 
+HOSPITAL_KEY_FILE="$AUTH/hospital_eth.key"
+if [ "$FRESH" -eq 0 ]; then
+  HOSPITAL_ADDRESS="$(node ethereum/scripts/check-qbft-authority.mjs "$QBFT/genesis.json" "$HOSPITAL_KEY_FILE")"
+fi
+
 docker rm -f medical-besu-1 medical-besu-2 medical-besu-3 medical-besu-4   medical-ipfs medical-ipfs-2 medical-ipfs-3 >/dev/null 2>&1 || true
 docker network rm "$NETWORK" >/dev/null 2>&1 || true
 docker network create --subnet 172.29.0.0/24 "$NETWORK" >/dev/null
@@ -57,6 +62,11 @@ if [ "$FRESH" -eq 1 ]; then
     chmod 600 "$QBFT/node$i/data/key"
   done
 fi
+
+if [ "$FRESH" -eq 1 ]; then
+  HOSPITAL_ADDRESS="$(node ethereum/scripts/check-qbft-authority.mjs "$QBFT/genesis.json" "$HOSPITAL_KEY_FILE")"
+fi
+export HOSPITAL_ADDRESS
 
 docker run -d --name medical-besu-1   --network "$NETWORK" --ip 172.29.0.11   -p 127.0.0.1:8545:8545   -v "$QBFT:/network"   "$BESU_IMAGE"   --data-path=/network/node1/data   --genesis-file=/network/genesis.json   --p2p-host=172.29.0.11 --p2p-port=30303   --rpc-http-enabled --rpc-http-host=0.0.0.0 --rpc-http-port=8545   --rpc-http-api=ETH,NET,QBFT,WEB3,ADMIN   --host-allowlist="*" --rpc-http-cors-origins="all"   --profile=ENTERPRISE >/dev/null
 
@@ -138,9 +148,49 @@ for name in medical-ipfs medical-ipfs-2 medical-ipfs-3; do
   test "$count" -ge 2
 done
 
-HOSPITAL_KEY_FILE="$AUTH/hospital_eth.key"
 cd "$(dirname "$0")/.."
-if [ "$FRESH" -eq 1 ]; then
+NEEDS_DEPLOY="$FRESH"
+if [ "$NEEDS_DEPLOY" -eq 0 ]; then
+  # Docker volumes can be lost independently of the runtime directory. A
+  # surviving deployment.json must never be treated as proof of on-chain code.
+  if python3 - <<'PY'
+import json
+import hashlib
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+try:
+    deployment = json.loads(Path("ethereum/deployment.json").read_text())
+    def rpc(method, params):
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
+                           "params": params}).encode()
+        with urlopen(Request("http://127.0.0.1:8545", body,
+                             {"Content-Type": "application/json"}), timeout=10) as response:
+            return json.load(response)["result"]
+    chain_id = int(rpc("eth_chainId", []), 16)
+    code = rpc("eth_getCode", [deployment["contractAddress"], "latest"])
+    if chain_id != int(deployment["chainId"]) or code in ("0x", "0x0"):
+        raise ValueError("deployment does not exist on the current demo chain")
+    if deployment["hospitalAddress"].lower() != __import__("os").environ["HOSPITAL_ADDRESS"].lower():
+        print("Deployment belongs to a different Hospital authority; migrate it explicitly")
+        raise SystemExit(2)
+    source_hash = hashlib.sha256(Path("ethereum/contracts/MedicalResearchRegistry.sol").read_bytes()).hexdigest()
+    if deployment.get("sourceSha256") != source_hash:
+        print("Deployment predates the current Solidity source; migrate or redeploy explicitly")
+        raise SystemExit(2)
+except (FileNotFoundError, KeyError, ValueError, OSError) as exc:
+    print(f"Deploying registry: {exc}")
+    raise SystemExit(1)
+PY
+  then
+    :
+  else
+    probe_status=$?
+    if [ "$probe_status" -eq 2 ]; then exit 1; fi
+    NEEDS_DEPLOY=1
+  fi
+fi
+if [ "$NEEDS_DEPLOY" -eq 1 ]; then
   ETH_RPC_URL=http://127.0.0.1:8545 MEDICAL_ETHEREUM_NETWORK=Besu-QBFT-4 MEDICAL_HOSPITAL_PRIVATE_KEY_FILE="$HOSPITAL_KEY_FILE" npm --prefix ethereum run deploy
 fi
 

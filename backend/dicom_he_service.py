@@ -198,6 +198,10 @@ def _validate_dicom_series(
         raise ValueError("DICOM input contains multiple series")
 
     for ds in datasets:
+        if int(getattr(ds, "NumberOfFrames", 1)) != 1:
+            raise ValueError(
+                "Multi-frame CT/MR objects require per-frame geometry and are unsupported"
+            )
         if str(getattr(ds, "BurnedInAnnotation", "")).upper() == "YES":
             raise ValueError(
                 "DICOM reports burned-in annotation; clean pixel data first"
@@ -334,10 +338,7 @@ def _fallback_volume(
 
         if transformed.ndim == 2:
             return transformed[np.newaxis, :, :]
-        if transformed.ndim == 3:
-            return transformed
-
-        raise ValueError("Unsupported DICOM pixel dimensions")
+        raise ValueError("Multi-frame or non-planar CT/MR pixels are unsupported")
 
     slices: list[np.ndarray] = []
     expected_shape: tuple[int, int] | None = None
@@ -714,7 +715,10 @@ def _normalization_scale(values: np.ndarray) -> float:
         return 1.0
 
     exponent = math.ceil(math.log2(max_abs))
-    scale = float(2 ** exponent)
+    try:
+        scale = math.ldexp(1.0, exponent)
+    except OverflowError as exc:
+        raise ValueError("DICOM value range cannot be normalized for CKKS") from exc
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError("DICOM value range cannot be normalized for CKKS")
     return scale

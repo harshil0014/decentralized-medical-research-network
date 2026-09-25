@@ -321,8 +321,9 @@ def decrypt_average(
     return {
         "job_id": job_id,
         "state": "DECRYPTED",
-        "metric": "fasting_glucose",
-        "unit": "mg/dL",
+        "metric": "selected_numeric_metric",
+        "unit": None,
+        "unit_note": "Interpret the result using the selected source CSV column's units",
         "average": average,
         "ckks_approximate": True,
         "accuracy_note": "Approximate CKKS result; no fixed error bound",

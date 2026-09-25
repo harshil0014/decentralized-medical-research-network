@@ -93,8 +93,7 @@ int main()
             }
             catch (...)
             {
-                cerr << "Invalid numeric medical value: "
-                     << line << "\n";
+                cerr << "Invalid numeric medical value\n";
                 return 1;
             }
         }
@@ -106,18 +105,10 @@ int main()
         return 1;
     }
 
-    cout << "Loaded "
-         << glucose.size()
-         << " medical values from CSV.\n";
-
-    cout << "Plaintext values available ONLY on hospital side:\n";
+    cout << "Loaded " << glucose.size() << " numeric values.\n";
 
     for (size_t i = 0; i < glucose.size(); i++)
     {
-        cout << "  Patient " << (i + 1)
-             << ": " << glucose[i]
-             << " mg/dL\n";
-
         Plaintext plain;
         encoder.encode(glucose[i], scale, plain);
 

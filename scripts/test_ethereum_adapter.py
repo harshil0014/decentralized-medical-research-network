@@ -12,6 +12,7 @@ import os
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -40,6 +41,22 @@ researcher_org = f"researcher-address:{researcher.address}"
 state = health()
 assert state["connected"] is True
 assert state["network"] in {"Ganache", "Besu-QBFT-4"}
+
+# Independent relayed transactions may arrive from separate API workers at
+# the same time. Every registration must receive a unique confirmed nonce.
+concurrent_ids = ["ds-" + uuid.uuid4().hex for _ in range(4)]
+with ThreadPoolExecutor(max_workers=4) as pool:
+    results = list(pool.map(
+        lambda candidate: invoke(
+            "RegisterDataset",
+            [candidate, "CSV", "sha256:" + "e" * 64, "ACTIVE"],
+            "org1",
+        ),
+        concurrent_ids,
+    ))
+assert results == [None] * len(concurrent_ids)
+assert all(query("DatasetExists", [candidate], "org1") == "true"
+           for candidate in concurrent_ids)
 
 invoke(
     "RegisterDataset",

@@ -124,7 +124,7 @@ def hospital_dataset_preview(dataset_id: str):
     except HTTPException:
         raise
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Requested frontend asset is unavailable") from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,

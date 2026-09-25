@@ -6,6 +6,7 @@ const state = {
   datasetTotal: 0,
   plaintextDownloadsEnabled: false,
   ethereumAddress: "",
+  ethereumChainId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -58,6 +59,10 @@ async function signResearcherDigest(digest) {
   if (!account || !expected || account !== expected) {
     throw new Error("Connected wallet does not match this researcher account");
   }
+  const connectedChain = await window.ethereum.request({ method: "eth_chainId" });
+  if (!state.ethereumChainId || Number.parseInt(connectedChain, 16) !== Number(state.ethereumChainId)) {
+    throw new Error(`Connected wallet is on the wrong network; switch to chain ${state.ethereumChainId}`);
+  }
   return window.ethereum.request({
     method: "personal_sign",
     params: [digest, accounts[0]],
@@ -105,6 +110,7 @@ async function login() {
     state.role = me.role;
     state.plaintextDownloadsEnabled = me.plaintextDownloadsEnabled === true;
     state.ethereumAddress = me.ethereumAddress || "";
+    state.ethereumChainId = me.ethereumChainId || null;
     sessionStorage.setItem("medical_token", state.token);
     sessionStorage.setItem("medical_role", state.role);
     openApp();
@@ -121,6 +127,7 @@ function logout() {
   state.role = "";
   state.plaintextDownloadsEnabled = false;
   state.ethereumAddress = "";
+  state.ethereumChainId = null;
   $("appView").classList.add("hidden");
   $("loginView").classList.remove("hidden");
   $("tokenInput").value = "";
@@ -478,6 +485,7 @@ function buildEncryptCard() {
     <input name="dataset_id" placeholder="Dataset ID" required>
     <input name="request_id" placeholder="Request ID" required>
     <input class="full" name="metric" value="glucose_mg_dl" placeholder="Metric" required>
+    <p class="full">CSV HE supports 2–1000 numeric values for the selected metric.</p>
     <div class="full form-actions"><button class="primary" type="submit">Encrypt</button></div>
   `;
   const out = outputBox("encryptOutput");
@@ -915,6 +923,7 @@ document.querySelectorAll(".nav-button").forEach((buttonEl) => {
     const me = await apiJson("/auth/me");
     state.role = me.role;
     state.ethereumAddress = me.ethereumAddress || "";
+    state.ethereumChainId = me.ethereumChainId || null;
     state.plaintextDownloadsEnabled = me.plaintextDownloadsEnabled === true;
     sessionStorage.setItem("medical_role", state.role);
     openApp();

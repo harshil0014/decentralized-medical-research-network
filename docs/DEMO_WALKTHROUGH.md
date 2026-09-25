@@ -12,7 +12,7 @@ Use synthetic data only. Run commands from the repository root on Ubuntu or WSL2
 ## Hospital and researcher workflow
 
 5. Log in with the Hospital token. In a separate browser profile, log in with a researcher token from `researchers.json`.
-6. Connect the researcher browser to the same Besu chain with its EIP-1193 wallet. Its selected address must match that researcher's registry address. The browser signs requests and HE compute actions; neither its private key nor seed phrase is entered into the API.
+6. Connect the researcher browser to the same Besu chain with its EIP-1193 wallet. Its selected address and chain ID must match that researcher's authenticated account and the backend deployment. The browser checks both before each signature; neither its private key nor seed phrase is entered into the API.
 7. In the Hospital **Datasets** view, upload a synthetic CSV. Record the generated opaque dataset ID. The upload encrypts the CSV as MEDAES before replicated IPFS storage and stores only commitments on Ethereum.
 8. In the researcher **Requests** view, create an access request with a purpose. The wallet signs the request. In the Hospital view, approve it. Record the opaque request ID.
 9. In Hospital **HE**, encrypt the CSV metric and record the job ID. In researcher **HE**, compute **Average** with a wallet signature. In Hospital **HE**, decrypt the result. Repeat with a fresh job and **Compute Sum**. Results identify CKKS approximation.

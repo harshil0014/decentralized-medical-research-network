@@ -20,6 +20,7 @@ from pydicom.uid import (
 )
 
 from backend.dicom_he_service import (
+    _normalization_scale,
     cleanup_dicom_he_job,
     compute_encrypted_dicom_analysis,
     create_encrypted_dicom_job,
@@ -162,6 +163,23 @@ def test_oblique_geometry_and_spacing() -> None:
         assert "inconsistent orientation" in str(exc)
     else:
         raise AssertionError("Inconsistent orientation was accepted")
+
+    # A multi-frame object needs per-frame geometry; one classic position and
+    # slice thickness cannot establish a medically correct volume.
+    multiframe = pydicom.dcmread(io.BytesIO(make_slice(
+        modality="CT", pixels=np.ones((2, 2), dtype=np.int16),
+        study_uid=study_uid, series_uid=series_uid, instance=1,
+    )))
+    multiframe.NumberOfFrames = 2
+    multiframe.PixelData = np.ones((2, 2, 2), dtype=np.int16).tobytes()
+    stream = io.BytesIO()
+    multiframe.save_as(stream, enforce_file_format=True)
+    try:
+        extract_dicom_analysis_values(stream.getvalue())
+    except ValueError as exc:
+        assert "Multi-frame" in str(exc)
+    else:
+        raise AssertionError("Unpositioned multi-frame CT was accepted")
     print("OBLIQUE GEOMETRY AND PHYSICAL SPACING: PASS")
 
 
@@ -728,6 +746,12 @@ def test_raw_above_old_ceiling() -> None:
 
 
 def test_ckks_result_quality_ranges() -> None:
+    try:
+        _normalization_scale(np.array([1e308], dtype=np.float64))
+    except ValueError as exc:
+        assert "cannot be normalized" in str(exc)
+    else:
+        raise AssertionError("Unrepresentable CKKS normalization was accepted")
     cases = {
         "positive": np.array([1.5, 2.0, 3.0, 4.5], dtype=np.float64),
         "negative": np.array([-4.5, -3.0, -2.0, -1.5], dtype=np.float64),
@@ -755,7 +779,7 @@ def test_ckks_result_quality_ranges() -> None:
                 assert result["ckks_approximate"] is True
                 assert "no fixed error bound" in result["accuracy_note"]
                 assert math.isfinite(result["value"])
-                tolerance = max(2e-4, abs(expected) * 1e-4)
+                tolerance = max(1e-6, abs(expected) * 1e-4)
                 assert abs(result["value"] - expected) <= tolerance, (label, analysis, result, expected)
             finally:
                 if job_id:

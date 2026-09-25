@@ -69,6 +69,23 @@ class _FailoverHTTPProvider(Web3.HTTPProvider):
 
 
 def _http_error(action: str, exc: Exception) -> HTTPException:
+    message = str(exc).lower()
+    if "revert" in message:
+        for reason, status in (
+            ("dataset missing", 404), ("request missing", 404),
+            ("he job missing", 404), ("rotation missing", 404),
+            ("hospital only", 403), ("signature mismatch", 403),
+            ("signature required", 403), ("access no longer active", 403),
+            ("access not active", 403), ("request not approved", 403),
+            ("dataset exists", 409), ("request exists", 409),
+            ("he job exists", 409), ("dataset not pending", 409),
+            ("dataset not ready", 409), ("request already terminal", 409),
+            ("he job not encrypted", 409), ("he job not computed", 409),
+            ("locator changed", 409), ("rotation exists", 409),
+            ("invalid", 400), ("required", 400),
+        ):
+            if reason in message:
+                return HTTPException(status_code=status, detail=reason)
     return HTTPException(
         status_code=503,
         detail=f"Ethereum {action} is unavailable or transaction state is uncertain; check ledger state before retrying",
@@ -150,6 +167,10 @@ def _account(org: str) -> str:
 
 def account_address(org: str) -> str:
     return _account(org)
+
+
+def deployment_chain_id() -> int:
+    return int(_deployment()["chainId"])
 
 
 def _hospital_private_key() -> str | None:
@@ -341,49 +362,41 @@ def _he_job(row, org: str = "org2", *, historical: bool = False) -> dict[str, An
 
 def _send(method: str, args: list[Any], org: str):
     try:
-        w3 = _web3()
-        fn = getattr(_contract().functions, method)(*args)
-        sender = _account(org)
-        estimated_gas = fn.estimate_gas({"from": sender})
-        gas_limit = max(
-            estimated_gas * 2,
-            estimated_gas + 100_000,
-        )
+        # All relayed transactions share the Hospital signer. Hold a
+        # cross-process lock until confirmation so another worker cannot
+        # reuse a pending nonce or read a stale nonce from a failover RPC.
+        AUTH_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_path = AUTH_ROOT / "ethereum-transactions.lock"
+        with open(lock_path, "a+") as lock_file:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                w3 = _web3()
+                fn = getattr(_contract().functions, method)(*args)
+                sender = _account(org)
+                estimated_gas = fn.estimate_gas({"from": sender})
+                gas_limit = max(estimated_gas * 2, estimated_gas + 100_000)
 
-        private_key = _hospital_private_key() if org == "org1" else None
-        if private_key:
-            nonce = w3.eth.get_transaction_count(sender, "pending")
-            transaction = fn.build_transaction(
-                {
-                    "from": sender,
-                    "nonce": nonce,
-                    "gas": gas_limit,
-                    "chainId": w3.eth.chain_id,
-                    "gasPrice": w3.eth.gas_price,
-                }
-            )
-            signed = w3.eth.account.sign_transaction(
-                transaction,
-                private_key=private_key,
-            )
-            tx_hash = w3.eth.send_raw_transaction(
-                signed.raw_transaction
-            )
-        else:
-            tx_hash = fn.transact({
-                "from": sender,
-                "gas": gas_limit,
-            })
+                private_key = _hospital_private_key() if org == "org1" else None
+                if private_key:
+                    nonce = w3.eth.get_transaction_count(sender, "pending")
+                    transaction = fn.build_transaction({
+                        "from": sender, "nonce": nonce, "gas": gas_limit,
+                        "chainId": w3.eth.chain_id, "gasPrice": w3.eth.gas_price,
+                    })
+                    signed = w3.eth.account.sign_transaction(
+                        transaction, private_key=private_key,
+                    )
+                    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                else:
+                    tx_hash = fn.transact({"from": sender, "gas": gas_limit})
 
-        receipt = w3.eth.wait_for_transaction_receipt(
-            tx_hash,
-            timeout=60,
-        )
-        if receipt.status != 1:
-            raise RuntimeError(
-                f"transaction reverted: {Web3.to_hex(tx_hash)}"
-            )
-        return receipt
+                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                if receipt.status != 1:
+                    raise RuntimeError(f"transaction reverted: {Web3.to_hex(tx_hash)}")
+                return receipt
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except HTTPException:
         raise
     except Exception as exc:

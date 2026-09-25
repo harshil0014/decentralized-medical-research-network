@@ -91,6 +91,13 @@ assert.equal((await hospitalContract.getDatasetPage(startingDatasetCount + 2, 2)
 assert.equal((await hospitalContract.getDatasetPage(startingDatasetCount + 4, 2)).length, 2);
 assert.equal((await hospitalContract.getDatasetPage(startingDatasetCount + 6, 2)).length, 0);
 assert.equal((await hospitalContract.getDatasetPage(startingDatasetCount, 2))[0].datasetId, datasetId);
+await sendTx(hospitalContract, "cancelPendingDatasetRegistration", pageIds[2]);
+assert.equal(Number(await hospitalContract.datasetCount()), startingDatasetCount + 5);
+const afterCancel = await hospitalContract.getDatasetPage(startingDatasetCount, 100);
+assert.equal(afterCancel.length, 5);
+assert(!afterCancel.some((record) => record.datasetId === pageIds[2] || !record.exists));
+await sendTx(hospitalContract, "registerDataset", pageIds[2], "CSV", metadataCommitment, "ACTIVE");
+assert.equal(Number(await hospitalContract.datasetCount()), startingDatasetCount + 6);
 assert.equal(Number(await hospitalContract.datasetHistoryCount(datasetId)), 2);
 assert.equal((await hospitalContract.getDatasetHistoryPage(datasetId, 1, 1))[0].storageState, "PRIVATE_READY");
 await assert.rejects(hospitalContract.getDatasetPage(0, 101));

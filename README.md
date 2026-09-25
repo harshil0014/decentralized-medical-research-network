@@ -96,6 +96,8 @@ ethereum/deployment.json
 
 The deployment file contains network metadata and public addresses. Besu RPC nodes do not hold researcher keys. The Hospital transaction key is stored in the external `~/.medical-decentralized/authority` directory by default. The backend tries the RPC endpoints in `MEDICAL_ETHEREUM_RPC_URLS` in order and fails over on transport failure.
 
+On restart, setup checks that the selected Hospital key is funded by the persisted QBFT genesis and that the recorded contract still exists on the chain. It refuses a different Hospital key, and redeploys only when the recorded contract is absent. Preserve the original authority key with the node volumes; moving an existing dataset to another authority or contract requires the explicit encrypted migration workflow.
+
 For the faster single-node Ganache CI compatibility path only:
 
 ```bash
@@ -261,11 +263,13 @@ Dataset key rotation creates a new active AES key generation for future encrypte
 
 ## CSV HE cohort limit
 
-The CSV HE demo accepts 2–1000 numeric values for one selected metric. The 1000-row synthetic boundary is covered by CI; larger cohorts require a different batching design and are rejected explicitly.
+The CSV HE demo accepts 2–1000 numeric values for one selected metric. The 1000-row synthetic boundary is covered by CI; larger cohorts require a different batching design and are rejected explicitly. CKKS results are approximate, and their units come from the selected source CSV column; the API does not assume a glucose unit for arbitrary metrics.
 
 ## DICOM analysis semantics
 
 Classic CT/MR slices are ordered by their patient-space plane normal. Inconsistent orientation or overlapping planes are rejected. Physical voxel volume is reported only when slice positions prove regular spacing; `TOTAL_ENERGY` requires that spacing. SEG analysis requires matching source references, frame of reference, orientation, matrix geometry and complete plane coverage. Independently uploaded source and SEG objects use the Hospital master key to create consistent pseudonymous UIDs.
+
+The CT/MR HE loader accepts classic single-frame slices. Multi-frame CT/MR objects are rejected because this prototype does not reconstruct or verify their per-frame geometry.
 
 `RAW_VOXELS` encrypts selected voxel values before researcher computation. It streams CKKS ciphertext chunks and checks free RAM-backed workspace capacity before encryption. `BLOCK_STATS` has the Hospital compute plaintext sums and squared sums, then encrypts those sufficient statistics; higher moments require `RAW_VOXELS`. Both modes return approximate CKKS results without a fixed error guarantee. Pixel identifiers are addressed by explicit Hospital visual review, separate from automated DICOM header de-identification. No automated pixel-PHI detector is claimed.
 
