@@ -2,6 +2,11 @@ const state = {
   token: sessionStorage.getItem("medical_token") || "",
   role: sessionStorage.getItem("medical_role") || "",
   datasets: [],
+  datasetOffset: 0,
+  datasetTotal: 0,
+  plaintextDownloadsEnabled: false,
+  ethereumAddress: "",
+  ethereumChainId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -44,6 +49,27 @@ function jsonBody(data) {
   };
 }
 
+async function signResearcherDigest(digest) {
+  if (!window.ethereum) {
+    throw new Error("MetaMask or another EIP-1193 wallet is required for researcher actions");
+  }
+  const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+  const account = (accounts?.[0] || "").toLowerCase();
+  const expected = (state.ethereumAddress || "").toLowerCase();
+  if (!account || !expected || account !== expected) {
+    throw new Error("Connected wallet does not match this researcher account");
+  }
+  const connectedChain = await window.ethereum.request({ method: "eth_chainId" });
+  if (!state.ethereumChainId || Number.parseInt(connectedChain, 16) !== Number(state.ethereumChainId)) {
+    throw new Error(`Connected wallet is on the wrong network; switch to chain ${state.ethereumChainId}`);
+  }
+  return window.ethereum.request({
+    method: "personal_sign",
+    params: [digest, accounts[0]],
+  });
+}
+
+
 function button(label, onClick, className = "") {
   const b = document.createElement("button");
   b.textContent = label;
@@ -82,6 +108,9 @@ async function login() {
   try {
     const me = await apiJson("/auth/me");
     state.role = me.role;
+    state.plaintextDownloadsEnabled = me.plaintextDownloadsEnabled === true;
+    state.ethereumAddress = me.ethereumAddress || "";
+    state.ethereumChainId = me.ethereumChainId || null;
     sessionStorage.setItem("medical_token", state.token);
     sessionStorage.setItem("medical_role", state.role);
     openApp();
@@ -96,6 +125,9 @@ function logout() {
   sessionStorage.removeItem("medical_role");
   state.token = "";
   state.role = "";
+  state.plaintextDownloadsEnabled = false;
+  state.ethereumAddress = "";
+  state.ethereumChainId = null;
   $("appView").classList.add("hidden");
   $("loginView").classList.remove("hidden");
   $("tokenInput").value = "";
@@ -111,12 +143,33 @@ async function openApp() {
 
 async function refreshDatasets() {
   try {
-    const data = await apiJson("/datasets");
+    const [data, count] = await Promise.all([
+      apiJson("/datasets?offset=0&limit=50"),
+      apiJson("/datasets/count"),
+    ]);
     state.datasets = Array.isArray(data) ? data : (data.datasets || []);
+    state.datasetOffset = 50;
+    state.datasetTotal = count.count;
     renderDatasetTable();
+    updateDatasetPager();
   } catch (error) {
     showToast(error.message);
   }
+}
+
+async function loadMoreDatasets() {
+  try {
+    const data = await apiJson(`/datasets?offset=${state.datasetOffset}&limit=50`);
+    state.datasets.push(...data);
+    state.datasetOffset += 50;
+    renderDatasetTable();
+    updateDatasetPager();
+  } catch (error) { showToast(error.message); }
+}
+
+function updateDatasetPager() {
+  const control = $("loadMoreDatasets");
+  if (control) control.classList.toggle("hidden", state.datasetOffset >= state.datasetTotal);
 }
 
 function renderAll() {
@@ -133,7 +186,9 @@ function renderDatasetsView() {
   toolbar.className = "toolbar";
   const title = document.createElement("h2");
   title.textContent = "Datasets";
-  toolbar.append(title, button("Refresh", refreshDatasets));
+  const more = button("Load more", loadMoreDatasets);
+  more.id = "loadMoreDatasets";
+  toolbar.append(title, button("Refresh", refreshDatasets), more);
   root.append(toolbar);
 
   if (state.role === "hospital") root.append(buildUploadCard());
@@ -145,6 +200,7 @@ function renderDatasetsView() {
   card.append(table);
   root.append(card);
   renderDatasetTable();
+  updateDatasetPager();
 }
 
 function buildUploadCard() {
@@ -156,11 +212,12 @@ function buildUploadCard() {
   const form = document.createElement("form");
   form.className = "form-grid";
   form.innerHTML = `
-    <input name="dataset_id" placeholder="Dataset ID" required>
+    <input name="dataset_id" placeholder="Local dataset label (never written on-chain)" required>
     <input name="data_type" placeholder="Data type" value="LAB_CSV" required>
     <input class="full" name="metadata_summary" placeholder="Metadata" required>
     <select name="consent_state"><option>ACTIVE</option><option>REVOKED</option></select>
     <input name="file" type="file" required>
+    <label class="full"><input name="visual_phi_reviewed" type="checkbox" value="true"> CT/MR pixel data visually reviewed; no burned-in identifiers or recognizable features remain</label>
     <div class="full form-actions"><button class="primary" type="submit">Upload</button></div>
   `;
 
@@ -278,8 +335,7 @@ function buildResearchRequestCard() {
   const form = document.createElement("form");
   form.className = "form-grid";
   form.innerHTML = `
-    <input id="requestDatasetId" name="dataset_id" placeholder="Dataset ID" required>
-    <input name="request_id" placeholder="Request ID">
+    <input id="requestDatasetId" name="dataset_id" placeholder="Opaque Dataset ID" required>
     <input class="full" name="purpose" placeholder="Purpose" required>
     <div class="full form-actions"><button class="primary" type="submit">Create</button></div>
   `;
@@ -287,17 +343,25 @@ function buildResearchRequestCard() {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const fd = new FormData(form);
-    const requestId = fd.get("request_id") || `REQ-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
     try {
-      const data = await apiJson("/requests", {
+      const prepared = await apiJson("/requests/prepare", {
         method: "POST",
         ...jsonBody({
-          request_id: requestId,
           dataset_id: fd.get("dataset_id"),
           purpose: fd.get("purpose"),
         }),
       });
-      $("requestLookupId").value = data.requestId || requestId;
+      const signature = await signResearcherDigest(prepared.signingDigest);
+      const data = await apiJson("/requests", {
+        method: "POST",
+        ...jsonBody({
+          request_id: prepared.requestId,
+          dataset_id: fd.get("dataset_id"),
+          purpose: fd.get("purpose"),
+          signature,
+        }),
+      });
+      $("requestLookupId").value = data.requestId;
       $("requestOutput").textContent = JSON.stringify(data, null, 2);
       showToast("Request created");
     } catch (error) {
@@ -331,7 +395,7 @@ function buildRequestLookupCard() {
       button("Approve", () => decideRequest("approve"), "primary"),
       button("Revoke", () => decideRequest("revoke"), "danger"),
     );
-  } else {
+  } else if (state.plaintextDownloadsEnabled) {
     actions.append(button("Download", downloadRequest));
   }
 
@@ -394,9 +458,20 @@ function renderHEView() {
   toolbar.append(title);
   root.append(toolbar);
 
-  if (state.role === "hospital") root.append(buildEncryptCard(), buildDecryptCard());
-  if (state.role === "researcher") root.append(buildComputeCard());
-  root.append(buildHELookupCard());
+  if (state.role === "hospital") {
+    root.append(
+      buildEncryptCard(),
+      buildDecryptCard(),
+      buildSumDecryptCard(),
+      buildDicomSegmentInspectorCard(),
+      buildDicomEncryptCard(),
+      buildDicomDecryptCard(),
+    );
+  }
+  if (state.role === "researcher") {
+    root.append(buildComputeCard(), buildSumComputeCard(), buildDicomComputeCard());
+  }
+  root.append(buildHELookupCard(), buildDicomHELookupCard());
 }
 
 function buildEncryptCard() {
@@ -410,6 +485,7 @@ function buildEncryptCard() {
     <input name="dataset_id" placeholder="Dataset ID" required>
     <input name="request_id" placeholder="Request ID" required>
     <input class="full" name="metric" value="glucose_mg_dl" placeholder="Metric" required>
+    <p class="full">CSV HE supports 2–1000 numeric values for the selected metric.</p>
     <div class="full form-actions"><button class="primary" type="submit">Encrypt</button></div>
   `;
   const out = outputBox("encryptOutput");
@@ -483,13 +559,68 @@ function buildComputeCard() {
     const id = input.value.trim();
     if (!id) return;
     try {
-      const data = await apiJson(`/he/glucose/${encodeURIComponent(id)}/compute-average`, { method: "POST" });
+      const signing = await apiJson(
+        `/he/glucose/${encodeURIComponent(id)}/signing-digest`,
+      );
+      const signature = await signResearcherDigest(signing.signingDigest);
+      const data = await apiJson(
+        `/he/glucose/${encodeURIComponent(id)}/compute-average`,
+        { method: "POST", ...jsonBody({ signature }) },
+      );
       $("computeOutput").textContent = JSON.stringify(data, null, 2);
       $("heLookupJobId").value = id;
     } catch (error) { showToast(error.message); }
   }, "primary"));
   row.append(input, actions);
   card.append(h, row, outputBox("computeOutput"));
+  return card;
+}
+
+function buildSumComputeCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const title = document.createElement("h3");
+  title.textContent = "Compute Sum";
+  const input = document.createElement("input");
+  input.placeholder = "Sum Job ID";
+  const out = outputBox("sumComputeOutput");
+  const action = button("Compute Sum", async () => {
+    const id = input.value.trim();
+    if (!id) return;
+    action.disabled = true;
+    try {
+      const signing = await apiJson(`/he/sum/${encodeURIComponent(id)}/signing-digest`);
+      const signature = await signResearcherDigest(signing.signingDigest);
+      const result = await apiJson(`/he/sum/${encodeURIComponent(id)}/compute`, {
+        method: "POST", ...jsonBody({ signature }),
+      });
+      out.textContent = JSON.stringify(result, null, 2);
+    } catch (error) { out.textContent = `Error: ${error.message}`; }
+    finally { action.disabled = false; }
+  }, "primary");
+  card.append(title, input, action, out);
+  return card;
+}
+
+function buildSumDecryptCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const title = document.createElement("h3");
+  title.textContent = "Decrypt Sum Result";
+  const input = document.createElement("input");
+  input.placeholder = "Sum Job ID";
+  const out = outputBox("sumDecryptOutput");
+  const action = button("Decrypt Sum", async () => {
+    const id = input.value.trim();
+    if (!id) return;
+    action.disabled = true;
+    try {
+      const result = await apiJson(`/he/sum/${encodeURIComponent(id)}/decrypt`, { method: "POST" });
+      out.textContent = JSON.stringify(result, null, 2);
+    } catch (error) { out.textContent = `Error: ${error.message}`; }
+    finally { action.disabled = false; }
+  }, "primary");
+  card.append(title, input, action, out);
   return card;
 }
 
@@ -513,6 +644,257 @@ function buildHELookupCard() {
   card.append(h, row, outputBox("heLookupOutput"));
   return card;
 }
+
+function buildDicomSegmentInspectorCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const h = document.createElement("h3");
+  h.textContent = "DICOM SEG Inspector";
+  const row = document.createElement("div");
+  row.className = "form-grid";
+  const input = document.createElement("input");
+  input.id = "dicomSegDatasetId";
+  input.placeholder = "DICOM SEG Dataset ID";
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  actions.append(button("List Segments", async () => {
+    const id = input.value.trim();
+    if (!id) return;
+    try {
+      const data = await apiJson(
+        `/he/dicom/segments/${encodeURIComponent(id)}`,
+      );
+      $("dicomSegOutput").textContent = JSON.stringify(data, null, 2);
+      const target = document.querySelector(
+        'form input[name="segmentation_dataset_id"]',
+      );
+      if (target) target.value = id;
+    } catch (error) {
+      showToast(error.message);
+    }
+  }, "primary"));
+  row.append(input, actions);
+  card.append(h, row, outputBox("dicomSegOutput"));
+  return card;
+}
+
+
+function buildDicomEncryptCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const h = document.createElement("h3");
+  h.textContent = "DICOM HE Encrypt";
+  const form = document.createElement("form");
+  form.className = "form-grid";
+  form.innerHTML = `
+    <input name="dataset_id" placeholder="DICOM Dataset ID" required>
+    <input name="request_id" placeholder="Approved Request ID" required>
+    <select name="analysis" title="Analysis">
+      <option value="MEAN">Mean</option>
+      <option value="SUM">Sum</option>
+      <option value="VARIANCE">Variance</option>
+      <option value="STANDARD_DEVIATION">Standard Deviation</option>
+      <option value="ENERGY">Energy</option>
+      <option value="TOTAL_ENERGY">Total Energy</option>
+      <option value="SECOND_MOMENT">Second Moment</option>
+      <option value="ROOT_MEAN_SQUARED">Root Mean Squared</option>
+      <option value="SKEWNESS">Skewness</option>
+      <option value="KURTOSIS">Kurtosis</option>
+      <option value="CENTRAL_MOMENT_3">Central Moment 3</option>
+      <option value="CENTRAL_MOMENT_4">Central Moment 4</option>
+    </select>
+    <select name="he_mode" title="HE mode">
+      <option value="RAW_VOXELS">Raw Voxels (CKKS)</option>
+      <option value="BLOCK_STATS">Hospital computed sufficient statistics, then CKKS</option>
+    </select>
+    <select name="scope" title="Scope">
+      <option value="WHOLE_VOLUME">Whole Volume</option>
+      <option value="SLICE">Single Slice</option>
+      <option value="ROI_BOX">ROI Box</option>
+      <option value="DICOM_SEG">DICOM SEG Mask</option>
+    </select>
+    <input name="slice_index" type="number" min="0" placeholder="Slice index (SLICE only)">
+    <input name="slice_start" type="number" min="0" placeholder="ROI slice start">
+    <input name="slice_end" type="number" min="1" placeholder="ROI slice end (exclusive)">
+    <input name="row_start" type="number" min="0" placeholder="ROI row start">
+    <input name="row_end" type="number" min="1" placeholder="ROI row end (exclusive)">
+    <input name="col_start" type="number" min="0" placeholder="ROI col start">
+    <input name="col_end" type="number" min="1" placeholder="ROI col end (exclusive)">
+    <input name="segmentation_dataset_id" placeholder="DICOM SEG Dataset ID (DICOM_SEG only)">
+    <input name="segmentation_request_id" placeholder="Approved SEG Request ID (DICOM_SEG only)">
+    <input name="segment_number" type="number" min="1" placeholder="Segment number (DICOM_SEG only)">
+    <div class="full hint">RAW_VOXELS encrypts selected CT/MR voxels. BLOCK_STATS has the Hospital compute plaintext sums and squared sums first, then encrypts those sufficient statistics; higher moments require RAW_VOXELS. DICOM SEG selection occurs at the Hospital.</div>
+    <div class="full form-actions"><button class="primary" type="submit">Encrypt DICOM</button></div>
+  `;
+  const out = outputBox("dicomEncryptOutput");
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const fd = new FormData(form);
+    const scope = String(fd.get("scope"));
+    const payload = {
+      dataset_id: String(fd.get("dataset_id")).trim(),
+      request_id: String(fd.get("request_id")).trim(),
+      analysis: String(fd.get("analysis")),
+      he_mode: String(fd.get("he_mode")),
+      scope,
+    };
+
+    try {
+      if (scope === "SLICE") {
+        const raw = String(fd.get("slice_index") || "").trim();
+        if (!raw) throw new Error("Slice index is required for SLICE scope");
+        payload.slice_index = Number(raw);
+      }
+
+      if (scope === "ROI_BOX") {
+        const names = [
+          "slice_start", "slice_end",
+          "row_start", "row_end",
+          "col_start", "col_end",
+        ];
+        const roi = {};
+        for (const name of names) {
+          const raw = String(fd.get(name) || "").trim();
+          if (!raw) throw new Error("All ROI box values are required");
+          roi[name] = Number(raw);
+        }
+        payload.roi_box = roi;
+      }
+
+      if (scope === "DICOM_SEG") {
+        const segId = String(fd.get("segmentation_dataset_id") || "").trim();
+        const segRequestId = String(fd.get("segmentation_request_id") || "").trim();
+        const segmentRaw = String(fd.get("segment_number") || "").trim();
+        if (!segId) throw new Error("DICOM SEG Dataset ID is required");
+        if (!segRequestId) throw new Error("Approved SEG Request ID is required");
+        if (!segmentRaw) throw new Error("Segment number is required");
+        payload.segmentation_dataset_id = segId;
+        payload.segmentation_request_id = segRequestId;
+        payload.segment_number = Number(segmentRaw);
+      }
+
+      const data = await apiJson("/he/dicom/encrypt", {
+        method: "POST",
+        ...jsonBody(payload),
+      });
+      out.textContent = JSON.stringify(data, null, 2);
+
+      if (data.job_id) {
+        const decrypt = $("dicomDecryptJobId");
+        const lookup = $("dicomHeLookupJobId");
+        if (decrypt) decrypt.value = data.job_id;
+        if (lookup) lookup.value = data.job_id;
+      }
+      showToast("DICOM encrypted");
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+
+  card.append(h, form, out);
+  return card;
+}
+
+function buildDicomDecryptCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const h = document.createElement("h3");
+  h.textContent = "DICOM HE Decrypt Result";
+  const row = document.createElement("div");
+  row.className = "form-grid";
+  const input = document.createElement("input");
+  input.id = "dicomDecryptJobId";
+  input.placeholder = "DICOM HE Job ID";
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  actions.append(button("Decrypt", async () => {
+    const id = input.value.trim();
+    if (!id) return;
+    try {
+      const data = await apiJson(`/he/dicom/${encodeURIComponent(id)}/decrypt`, {
+        method: "POST",
+      });
+      $("dicomDecryptOutput").textContent = JSON.stringify(data, null, 2);
+      const lookup = $("dicomHeLookupJobId");
+      if (lookup) lookup.value = id;
+    } catch (error) {
+      showToast(error.message);
+    }
+  }, "primary"));
+  row.append(input, actions);
+  card.append(h, row, outputBox("dicomDecryptOutput"));
+  return card;
+}
+
+function buildDicomComputeCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const h = document.createElement("h3");
+  h.textContent = "DICOM HE Compute";
+  const row = document.createElement("div");
+  row.className = "form-grid";
+  const input = document.createElement("input");
+  input.id = "dicomComputeJobId";
+  input.placeholder = "DICOM HE Job ID";
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  actions.append(button("Compute", async () => {
+    const id = input.value.trim();
+    if (!id) return;
+    try {
+      const signing = await apiJson(
+        `/he/dicom/${encodeURIComponent(id)}/signing-digest`,
+      );
+      const signature = await signResearcherDigest(signing.signingDigest);
+      const data = await apiJson(`/he/dicom/${encodeURIComponent(id)}/compute`, {
+        method: "POST",
+        ...jsonBody({ signature }),
+      });
+      $("dicomComputeOutput").textContent = JSON.stringify(data, null, 2);
+      const lookup = $("dicomHeLookupJobId");
+      if (lookup) lookup.value = id;
+    } catch (error) {
+      showToast(error.message);
+    }
+  }, "primary"));
+  row.append(input, actions);
+  card.append(h, row, outputBox("dicomComputeOutput"));
+  return card;
+}
+
+function buildDicomHELookupCard() {
+  const card = document.createElement("div");
+  card.className = "card";
+  const h = document.createElement("h3");
+  h.textContent = "DICOM HE Job";
+  const row = document.createElement("div");
+  row.className = "form-grid";
+  const input = document.createElement("input");
+  input.id = "dicomHeLookupJobId";
+  input.placeholder = "DICOM HE Job ID";
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  actions.append(
+    button("Ledger", () => loadDicomHE("ledger")),
+    button("History", () => loadDicomHE("history")),
+  );
+  row.append(input, actions);
+  card.append(h, row, outputBox("dicomHeLookupOutput"));
+  return card;
+}
+
+async function loadDicomHE(kind) {
+  const id = $("dicomHeLookupJobId").value.trim();
+  if (!id) return;
+  try {
+    const data = await apiJson(`/he/dicom/${encodeURIComponent(id)}/${kind}`);
+    $("dicomHeLookupOutput").textContent = JSON.stringify(data, null, 2);
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 
 async function loadHE(kind) {
   const id = $("heLookupJobId").value.trim();
@@ -540,6 +922,9 @@ document.querySelectorAll(".nav-button").forEach((buttonEl) => {
   try {
     const me = await apiJson("/auth/me");
     state.role = me.role;
+    state.ethereumAddress = me.ethereumAddress || "";
+    state.ethereumChainId = me.ethereumChainId || null;
+    state.plaintextDownloadsEnabled = me.plaintextDownloadsEnabled === true;
     sessionStorage.setItem("medical_role", state.role);
     openApp();
   } catch (_) {

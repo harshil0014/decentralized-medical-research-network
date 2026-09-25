@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 from fastapi import (
@@ -9,6 +10,8 @@ from fastapi import (
 from pydantic import BaseModel
 
 from backend.api_auth import (
+    AuthIdentity,
+    researcher_org,
     require_authenticated,
     require_hospital,
     require_researcher,
@@ -16,7 +19,9 @@ from backend.api_auth import (
 
 from backend.runtime_security import (
     require_mutation_lock,
+    require_job_lock,
 )
+from backend.researcher_signing import verify_researcher_signature
 
 from backend.storage_crypto import (
     decrypt_bytes,
@@ -53,6 +58,10 @@ class GlucoseCohortInput(BaseModel):
     metric: str = "fasting_glucose"
 
 
+class ResearcherSignatureInput(BaseModel):
+    signature: str
+
+
 def _ledger_invoke(
     function: str,
     args: list[str],
@@ -85,15 +94,29 @@ def _ledger_query(
     return json.loads(raw)
 
 
+def _ledger_scalar_query(
+    function: str,
+    args: list[str],
+    org: str,
+) -> str:
+    from backend.app import query
+    return query(function, args, org)
+
+
 def _require_approved_access(
     dataset_id: str,
     request_id: str,
+    *,
+    actor_org: str | None = None,
+    actor_address: str | None = None,
 ) -> dict:
+
+    query_org = actor_org or "org2"
 
     request = _ledger_query(
         "ReadAccessRequest",
         [request_id],
-        "org2",
+        query_org,
     )
 
     if request.get("datasetId") != dataset_id:
@@ -105,6 +128,14 @@ def _require_approved_access(
             ),
         )
 
+    if actor_address is not None and str(
+        request.get("requesterAddress") or ""
+    ).lower() != actor_address.lower():
+        raise HTTPException(
+            status_code=403,
+            detail="Access request belongs to a different researcher identity",
+        )
+
     if request.get("status") != "APPROVED":
         raise HTTPException(
             status_code=403,
@@ -114,7 +145,7 @@ def _require_approved_access(
     allowed = _ledger_query(
         "CanAccess",
         [request_id],
-        "org2",
+        query_org,
     )
 
     if allowed is not True:
@@ -164,11 +195,7 @@ def encrypt_glucose_cohort(
             or ""
         ).upper()
 
-        if data_type not in {
-            "LAB_CSV",
-            "NUMERIC_CSV",
-            "CSV",
-        }:
+        if data_type != "CSV":
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -188,24 +215,17 @@ def encrypt_glucose_cohort(
             dataset["sha256"],
         )
 
-        if is_encrypted_dataset(stored_dataset_bytes):
-            dataset_bytes = decrypt_bytes(
-                payload.dataset_id,
-                stored_dataset_bytes,
+        if not is_encrypted_dataset(stored_dataset_bytes):
+            raise HTTPException(
+                status_code=409,
+                detail="Unencrypted legacy dataset objects are not supported",
             )
 
-            dataset_storage_encryption = (
-                "AES-256-GCM"
-            )
-
-        else:
-            # Compatibility with datasets created before
-            # AES encrypted-at-rest storage existed.
-            dataset_bytes = stored_dataset_bytes
-
-            dataset_storage_encryption = (
-                "LEGACY-PLAINTEXT"
-            )
+        dataset_bytes = decrypt_bytes(
+            payload.dataset_id,
+            stored_dataset_bytes,
+        )
+        dataset_storage_encryption = "AES-256-GCM"
 
         values = extract_numeric_metric_from_csv(
             dataset_bytes,
@@ -233,7 +253,11 @@ def encrypt_glucose_cohort(
                     job_id,
                     payload.dataset_id,
                     payload.request_id,
-                    payload.metric,
+                    "",
+                    "",
+                    "CSV:sha256:" + hashlib.sha256(
+                        payload.metric.strip().encode("utf-8")
+                    ).hexdigest(),
                     str(result["count"]),
                     ciphertext_cid,
                     result[
@@ -320,35 +344,65 @@ def encrypt_glucose_cohort(
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=404,
-            detail=str(exc),
+            detail="Required HE artifact is unavailable",
         ) from exc
 
     except Exception as exc:
         raise HTTPException(
-            status_code=500,
-            detail=(
-                f"IPFS-backed HE encryption failed: {exc}"
-            ),
+            status_code=503,
+            detail="HE encryption failed; check job state and Hospital diagnostics before retrying",
         ) from exc
+
+
+@router.get("/{job_id}/signing-digest")
+def compute_signing_digest(
+    job_id: str,
+    identity: AuthIdentity = Depends(require_researcher),
+):
+    actor_org = researcher_org(identity)
+    from backend.ethereum_ledger import account_address
+    actor_address = account_address(actor_org)
+    ledger = _ledger_query("ReadHEJob", [job_id], actor_org)
+
+    if str(ledger.get("researcherAddress") or "").lower() != actor_address.lower():
+        raise HTTPException(
+            status_code=403,
+            detail="HE job belongs to a different researcher wallet",
+        )
+    if ledger.get("status") != "ENCRYPTED":
+        raise HTTPException(status_code=409, detail="HE job is not in ENCRYPTED state")
+
+    digest = _ledger_scalar_query("HEComputeDigest", [job_id], actor_org)
+    return {
+        "jobId": job_id,
+        "signingDigest": digest,
+        "ethereumAddress": actor_address,
+        "signatureScheme": "EIP-191 personal_sign",
+    }
 
 
 @router.post(
     "/{job_id}/compute-average",
     dependencies=[
-        Depends(require_researcher),
-        Depends(require_mutation_lock),
+        Depends(require_job_lock),
     ],
 )
 def compute_average(
     job_id: str,
+    body: ResearcherSignatureInput,
+    identity: AuthIdentity = Depends(require_researcher),
 ):
     result_cid = None
 
     try:
+        actor_org = researcher_org(identity)
+        from backend.ethereum_ledger import account_address
+        actor_address = account_address(actor_org)
+
         ledger = _ledger_query(
             "ReadHEJob",
             [job_id],
-            "org2",
+            actor_org,
         )
 
         if ledger.get("status") != "ENCRYPTED":
@@ -360,6 +414,19 @@ def compute_average(
         _require_approved_access(
             ledger["datasetId"],
             ledger["requestId"],
+            actor_org=actor_org,
+            actor_address=actor_address,
+        )
+
+        signing_digest = _ledger_scalar_query(
+            "HEComputeDigest",
+            [job_id],
+            actor_org,
+        )
+        verify_researcher_signature(
+            identity,
+            signing_digest,
+            body.signature,
         )
 
         ciphertext_cid = ledger.get(
@@ -409,13 +476,14 @@ def compute_average(
 
         try:
             _ledger_invoke(
-                "RecordHEComputation",
+                "RecordHEComputationSigned",
                 [
                     job_id,
                     result_cid,
                     result["result_sha256"],
+                    body.signature,
                 ],
-                "org2",
+                "org1",
             )
 
         except Exception:
@@ -434,7 +502,7 @@ def compute_average(
         ledger = _ledger_query(
             "ReadHEJob",
             [job_id],
-            "org2",
+            actor_org,
         )
 
         if ledger.get("resultCid") != result_cid:
@@ -500,15 +568,13 @@ def compute_average(
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=404,
-            detail=str(exc),
+            detail="Required HE artifact is unavailable",
         ) from exc
 
     except Exception as exc:
         raise HTTPException(
-            status_code=500,
-            detail=(
-                f"IPFS-backed HE computation failed: {exc}"
-            ),
+            status_code=503,
+            detail="HE computation failed; check job state and Hospital diagnostics before retrying",
         ) from exc
 
 
@@ -534,6 +600,11 @@ def decrypt_he_average(
                 status_code=409,
                 detail="HE job is not in COMPUTED state",
             )
+
+        _require_approved_access(
+            ledger["datasetId"],
+            ledger["requestId"],
+        )
 
         ciphertext_cid = ledger.get(
             "ciphertextCid"
@@ -640,15 +711,13 @@ def decrypt_he_average(
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=404,
-            detail=str(exc),
+            detail="Required HE artifact is unavailable",
         ) from exc
 
     except Exception as exc:
         raise HTTPException(
-            status_code=500,
-            detail=(
-                f"IPFS-backed HE decryption failed: {exc}"
-            ),
+            status_code=503,
+            detail="HE decryption failed; check job state and Hospital diagnostics before retrying",
         ) from exc
 
 
@@ -683,10 +752,14 @@ def read_he_ledger(
 )
 def read_he_history(
     job_id: str,
+    offset: int = 0,
+    limit: int = 50,
 ):
+    if offset < 0 or not 1 <= limit <= 100:
+        raise HTTPException(status_code=400, detail="Invalid pagination")
     history = _ledger_query(
         "GetHEJobHistory",
-        [job_id],
+        [job_id, str(offset), str(limit)],
         "org2",
     )
 

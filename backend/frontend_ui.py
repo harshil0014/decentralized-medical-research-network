@@ -52,14 +52,6 @@ def frontend_preview_js():
     )
 
 
-@router.get("/frontend-extra-he.js", include_in_schema=False)
-def frontend_extra_he_js():
-    return FileResponse(
-        FRONTEND_ROOT / "extra-he.js",
-        media_type="application/javascript",
-    )
-
-
 @router.get(
     "/datasets/{dataset_id}/preview",
     dependencies=[Depends(require_hospital)],
@@ -89,10 +81,12 @@ def hospital_dataset_preview(dataset_id: str):
         stored = fetch_ipfs_dataset_bytes(dataset["cid"])
         verify_dataset_bytes(stored, dataset["sha256"])
 
-        if is_encrypted_dataset(stored):
-            content = decrypt_bytes(dataset_id, stored)
-        else:
-            content = stored
+        if not is_encrypted_dataset(stored):
+            raise HTTPException(
+                status_code=422,
+                detail="Dataset is not an encrypted MEDAES object",
+            )
+        content = decrypt_bytes(dataset_id, stored)
 
         try:
             text = content.decode("utf-8-sig")
@@ -130,9 +124,9 @@ def hospital_dataset_preview(dataset_id: str):
     except HTTPException:
         raise
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Requested frontend asset is unavailable") from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Dataset preview failed: {exc}",
+            detail="Dataset preview failed; verify encrypted object availability",
         ) from exc

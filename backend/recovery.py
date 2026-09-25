@@ -1,0 +1,571 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+from backend.data_backup import (
+    collect_backup_manifest,
+    restore_missing_ipfs_objects,
+)
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+
+MAGIC = b"MEDREC01"
+NONCE_SIZE = 12
+_KEY_FILE = re.compile(
+    r"^(?:[0-9a-f]{64}\.key|[0-9a-f]{64}\.v[1-9][0-9]*\.key|[0-9a-f]{64}\.json)$"
+)
+
+
+def _utc_now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _key_root() -> Path:
+    return Path(
+        os.environ.get(
+            "MEDICAL_KEY_ROOT",
+            str(Path.home() / ".medical-registry" / "dataset_keys"),
+        )
+    )
+
+
+def _locator_path() -> Path:
+    auth_root = Path(
+        os.environ.get(
+            "MEDICAL_REGISTRY_AUTH_DIR",
+            "/root/.medical-registry",
+        )
+    )
+    return Path(
+        os.environ.get(
+            "MEDICAL_ETHEREUM_PRIVATE_LOCATORS",
+            str(auth_root / "ethereum_private_locators.json"),
+        )
+    )
+
+
+def _he_locator_path() -> Path:
+    auth_root = Path(os.environ.get("MEDICAL_REGISTRY_AUTH_DIR", "/root/.medical-registry"))
+    return Path(os.environ.get("MEDICAL_ETHEREUM_HE_LOCATORS", str(auth_root / "ethereum_he_locators.json")))
+
+
+def _read_he_locators() -> dict:
+    path = _he_locator_path()
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise RuntimeError("Private HE locator store is invalid")
+    return data
+
+
+def recovery_backup_path() -> Path:
+    raw = os.environ.get("MEDICAL_RECOVERY_BACKUP_PATH", "").strip()
+    if not raw:
+        raise RuntimeError(
+            "MEDICAL_RECOVERY_BACKUP_PATH must point to a separate backup destination"
+        )
+
+    path = Path(raw)
+    resolved = path.resolve()
+    key_root = _key_root().resolve()
+    auth_root = Path(
+        os.environ.get(
+            "MEDICAL_REGISTRY_AUTH_DIR",
+            "/root/.medical-registry",
+        )
+    ).resolve()
+    ipfs_root_raw = os.environ.get("MEDICAL_IPFS_DATA_ROOT", "").strip()
+    protected_roots = [(key_root, "dataset key directory"),
+                       (auth_root, "authentication/private-locator directory")]
+    if ipfs_root_raw:
+        protected_roots.append((Path(ipfs_root_raw).resolve(), "primary IPFS data directory"))
+
+    for protected_root, label in protected_roots:
+        try:
+            resolved.relative_to(protected_root)
+        except ValueError:
+            continue
+        raise RuntimeError(
+            f"Recovery backup must not be stored inside the {label}"
+        )
+
+    return path
+
+
+def _master_key() -> bytes:
+    raw = os.environ.get("MEDICAL_MASTER_KEY_HEX", "").strip()
+    if len(raw) != 64:
+        raise RuntimeError(
+            "MEDICAL_MASTER_KEY_HEX must provide a 32-byte external secret"
+        )
+    try:
+        key = bytes.fromhex(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            "MEDICAL_MASTER_KEY_HEX must be hexadecimal"
+        ) from exc
+    if len(key) != 32:
+        raise RuntimeError(
+            "MEDICAL_MASTER_KEY_HEX must provide a 32-byte external secret"
+        )
+    return key
+
+
+def _recovery_key() -> bytes:
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=hashlib.sha256(b"medical-registry-recovery-v1").digest(),
+        info=b"medical-registry-recovery-bundle",
+    ).derive(_master_key())
+
+
+def _canonical(payload: object) -> bytes:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _read_locators() -> dict:
+    path = _locator_path()
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Private locator store is corrupt") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("Private locator store is invalid")
+    return value
+
+
+def _collect_key_files() -> dict[str, str]:
+    root = _key_root()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    files: dict[str, str] = {}
+    for path in sorted(root.iterdir()):
+        if not path.is_file() or not _KEY_FILE.fullmatch(path.name):
+            continue
+        files[path.name] = base64.b64encode(path.read_bytes()).decode("ascii")
+    return files
+
+
+def _ledger_fingerprint() -> dict:
+    from backend.ethereum_ledger import health
+
+    state = health()
+    return {
+        "chainId": int(state["chainId"]),
+        "contractAddress": str(state["contractAddress"]).lower(),
+    }
+
+
+def _build_payload() -> dict:
+    key_files = _collect_key_files()
+    locators = _read_locators()
+    he_locators = _read_he_locators()
+
+    manifest = {
+        "keyFiles": {
+            name: hashlib.sha256(base64.b64decode(value)).hexdigest()
+            for name, value in key_files.items()
+        },
+        "privateLocatorsSha256": hashlib.sha256(
+            _canonical(locators)
+        ).hexdigest(),
+        "heLocatorsSha256": hashlib.sha256(_canonical(he_locators)).hexdigest(),
+    }
+
+    object_backups = collect_backup_manifest()
+    if set(object_backups) != set(locators):
+        raise RuntimeError(
+            "Encrypted-object backup set does not match private locator set"
+        )
+
+    return {
+        "schemaVersion": 1,
+        "createdAt": _utc_now(),
+        "ledger": _ledger_fingerprint(),
+        "keyFiles": key_files,
+        "privateLocators": locators,
+        "heLocators": he_locators,
+        "objectBackups": object_backups,
+        "manifest": manifest,
+    }
+
+
+def export_recovery_bundle() -> bytes:
+    payload = _build_payload()
+    plaintext = _canonical(payload)
+    nonce = os.urandom(NONCE_SIZE)
+    ciphertext = AESGCM(_recovery_key()).encrypt(
+        nonce,
+        plaintext,
+        MAGIC,
+    )
+    return MAGIC + nonce + ciphertext
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+
+    temporary = path.with_name(
+        "." + path.name + "." + os.urandom(6).hex() + ".tmp"
+    )
+
+    fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary, path)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    except Exception:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def snapshot_recovery_bundle() -> dict:
+    path = recovery_backup_path()
+    bundle = export_recovery_bundle()
+    _atomic_write(path, bundle)
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(bundle).hexdigest(),
+        "size": len(bundle),
+    }
+
+
+def _decode_bundle(bundle: bytes, *, expected_ledger: dict | None = None) -> dict:
+    if not bundle.startswith(MAGIC):
+        raise ValueError("Recovery bundle magic is invalid")
+
+    if len(bundle) < len(MAGIC) + NONCE_SIZE + 16:
+        raise ValueError("Recovery bundle is truncated")
+
+    offset = len(MAGIC)
+    nonce = bundle[offset:offset + NONCE_SIZE]
+    ciphertext = bundle[offset + NONCE_SIZE:]
+
+    try:
+        plaintext = AESGCM(_recovery_key()).decrypt(
+            nonce,
+            ciphertext,
+            MAGIC,
+        )
+    except Exception as exc:
+        raise ValueError(
+            "Recovery bundle authentication failed"
+        ) from exc
+
+    try:
+        payload = json.loads(plaintext)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Recovery bundle payload is invalid") from exc
+
+    if payload.get("schemaVersion") != 1:
+        raise ValueError("Unsupported recovery bundle schema")
+
+    current = expected_ledger or _ledger_fingerprint()
+    recorded = payload.get("ledger") or {}
+    if (
+        int(recorded.get("chainId", -1)) != current["chainId"]
+        or str(recorded.get("contractAddress", "")).lower()
+        != current["contractAddress"]
+    ):
+        raise ValueError(
+            "Recovery bundle belongs to a different chain or contract"
+        )
+
+    key_files = payload.get("keyFiles")
+    locators = payload.get("privateLocators")
+    manifest = payload.get("manifest")
+    object_backups = payload.get("objectBackups")
+
+    if not isinstance(key_files, dict) or not isinstance(locators, dict):
+        raise ValueError("Recovery bundle content is invalid")
+    if not isinstance(object_backups, dict):
+        raise ValueError("Recovery encrypted-object manifest is missing")
+    if set(object_backups) != set(locators):
+        raise ValueError("Recovery encrypted-object manifest is incomplete")
+    if not isinstance(manifest, dict):
+        raise ValueError("Recovery bundle manifest is missing")
+
+    manifest_keys = manifest.get("keyFiles")
+    if not isinstance(manifest_keys, dict):
+        raise ValueError("Recovery key manifest is invalid")
+
+    for name, encoded in key_files.items():
+        if not _KEY_FILE.fullmatch(name):
+            raise ValueError("Recovery bundle contains an invalid key filename")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except Exception as exc:
+            raise ValueError("Recovery key file encoding is invalid") from exc
+        if hashlib.sha256(raw).hexdigest() != manifest_keys.get(name):
+            raise ValueError("Recovery key file integrity check failed")
+
+    if hashlib.sha256(_canonical(locators)).hexdigest() != manifest.get(
+        "privateLocatorsSha256"
+    ):
+        raise ValueError("Recovery private locator integrity check failed")
+
+    he_locators = payload.get("heLocators", {})
+    if not isinstance(he_locators, dict):
+        raise ValueError("Recovery HE locator store is invalid")
+    expected_he = manifest.get("heLocatorsSha256")
+    if expected_he is not None and hashlib.sha256(_canonical(he_locators)).hexdigest() != expected_he:
+        raise ValueError("Recovery HE locator integrity check failed")
+
+    return payload
+
+
+def migrate_recovery_bundle(
+    bundle: bytes, *, source_rpc_url: str, source_chain_id: int,
+    source_contract_address: str,
+) -> dict:
+    """Hospital-authorized encrypted migration to a distinct deployment."""
+    from eth_abi import encode
+    from web3 import Web3
+    from backend.ethereum_ledger import invoke, invoke_private_org1, query, _deployment
+
+    source = {"chainId": int(source_chain_id),
+              "contractAddress": Web3.to_checksum_address(source_contract_address).lower()}
+    destination = _ledger_fingerprint()
+    if source == destination:
+        raise ValueError("Migration requires a distinct source deployment")
+    payload = _decode_bundle(bundle, expected_ledger=source)
+    if collect_backup_manifest() != payload["objectBackups"]:
+        raise ValueError("Destination encrypted-object backup does not match source bundle")
+    existing_keys = _collect_key_files()
+    if existing_keys and existing_keys != payload["keyFiles"]:
+        raise ValueError("Destination key store is not empty or identical to the migration bundle")
+    existing_locators = _read_locators()
+    if any(key not in payload["privateLocators"] or value != payload["privateLocators"][key]
+           for key, value in existing_locators.items()):
+        raise ValueError("Destination private locators conflict with migration bundle")
+
+    source_web3 = Web3(Web3.HTTPProvider(source_rpc_url, request_kwargs={"timeout": 10}))
+    if source_web3.eth.chain_id != source["chainId"]:
+        raise ValueError("Source RPC chain ID does not match the recovery bundle")
+    abi_path = Path(__file__).resolve().parents[1] / "ethereum/build/MedicalResearchRegistry.abi.json"
+    abi = json.loads(abi_path.read_text())
+    source_contract = source_web3.eth.contract(address=Web3.to_checksum_address(source_contract_address), abi=abi)
+    hospital = str(_deployment()["hospitalAddress"]).lower()
+    verified = []
+    for dataset_id, locator in sorted(payload["privateLocators"].items()):
+        row = source_contract.functions.getDataset(dataset_id).call()
+        commitment = Web3.keccak(text=f"{locator['cid']}:{locator['sha256'].lower()}")
+        if (not row[10] or str(row[1]).lower() != hospital
+                or row[5] != "PRIVATE_READY" or bytes(row[6]) != commitment):
+            raise ValueError(f"Source dataset commitment or Hospital authority mismatch: {dataset_id}")
+        verified.append((dataset_id, row, locator, Web3.to_hex(commitment)))
+
+    for dataset_id, row, locator, commitment in verified:
+        if query("DatasetExists", [dataset_id], "org1") != "true":
+            invoke("RegisterDataset", [dataset_id, row[2], row[3], row[4]], "org1")
+        public = json.loads(query("ReadDataset", [dataset_id], "org1"))
+        if public["storageState"] == "PRIVATE_PENDING":
+            invoke_private_org1("StoreDatasetLocatorPrivate", [dataset_id], {"dataset_locator": locator})
+            invoke("FinalizeDatasetRegistration", [dataset_id], "org1")
+        public = json.loads(query("ReadDataset", [dataset_id], "org1"))
+        if public["locatorCommitment"].lower() != commitment.lower():
+            raise ValueError(f"Destination dataset commitment mismatch: {dataset_id}")
+        expected_source = Web3.keccak(encode(
+            ["uint256", "address"],
+            [source["chainId"], Web3.to_checksum_address(source_contract_address)],
+        ))
+        recorded = query("MigrationSource", [dataset_id], "org1")
+        if int(recorded, 16) == 0:
+            invoke("RecordDatasetMigration", [dataset_id, str(source["chainId"]), source_contract_address], "org1")
+        elif recorded.lower() != Web3.to_hex(expected_source).lower():
+            raise ValueError(f"Destination migration provenance conflicts: {dataset_id}")
+
+    payload["ledger"] = destination
+    payload["heLocators"] = {}
+    payload["manifest"]["heLocatorsSha256"] = hashlib.sha256(_canonical({})).hexdigest()
+    nonce = os.urandom(NONCE_SIZE)
+    destination_bundle = MAGIC + nonce + AESGCM(_recovery_key()).encrypt(
+        nonce, _canonical(payload), MAGIC,
+    )
+    restored = restore_recovery_bundle(destination_bundle, replace_existing=True)
+    snapshot = snapshot_recovery_bundle()
+    return {"source": source, "destination": destination,
+            "migratedDatasets": len(verified), "recovery": restored,
+            "destinationBackup": snapshot}
+
+
+def restore_recovery_bundle(
+    bundle: bytes,
+    *,
+    replace_existing: bool = False,
+) -> dict:
+    payload = _decode_bundle(bundle)
+
+    key_root = _key_root()
+    locator_path = _locator_path()
+    he_locator_path = _he_locator_path()
+    key_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    key_files = payload["keyFiles"]
+    locators = payload["privateLocators"]
+
+    targets = {
+        key_root / name: base64.b64decode(encoded)
+        for name, encoded in key_files.items()
+    }
+
+    if not replace_existing:
+        conflicts = [
+            str(path)
+            for path in targets
+            if path.exists()
+        ]
+        if locator_path.exists():
+            conflicts.append(str(locator_path))
+        if he_locator_path.exists():
+            conflicts.append(str(he_locator_path))
+        if conflicts:
+            raise RuntimeError(
+                "Recovery restore would overwrite existing state; "
+                "set replace_existing=true only for an intentional restore"
+            )
+
+    managed_existing = {
+        path
+        for path in key_root.iterdir()
+        if path.is_file() and _KEY_FILE.fullmatch(path.name)
+    }
+
+    original_files: dict[Path, bytes | None] = {
+        path: path.read_bytes() if path.exists() else None
+        for path in (managed_existing | set(targets))
+    }
+    original_locator = (
+        locator_path.read_bytes()
+        if locator_path.exists()
+        else None
+    )
+    original_he_locator = he_locator_path.read_bytes() if he_locator_path.exists() else None
+
+    restored_cids: list[str] = []
+    try:
+        for path, raw in targets.items():
+            _atomic_write(path, raw)
+
+        if replace_existing:
+            for stale in sorted(managed_existing - set(targets)):
+                stale.unlink()
+
+        _atomic_write(
+            locator_path,
+            (
+                json.dumps(
+                    locators,
+                    sort_keys=True,
+                    indent=2,
+                )
+                + "\n"
+            ).encode("utf-8"),
+        )
+
+        from backend.storage_crypto import load_dataset_key_metadata
+        from backend.ethereum_ledger import query
+
+        ipfs_recovery = restore_missing_ipfs_objects(
+            locators,
+            expected_manifest=payload["objectBackups"],
+        )
+        _atomic_write(
+            he_locator_path,
+            (json.dumps(payload.get("heLocators", {}), sort_keys=True) + "\n").encode(),
+        )
+        restored_cids = ipfs_recovery.pop("restoredCids")
+
+        verified = 0
+        for dataset_id in sorted(locators):
+            load_dataset_key_metadata(dataset_id)
+            query("ReadDatasetPrivate", [dataset_id], "org1")
+            verified += 1
+
+    except Exception:
+        from backend.ipfs_storage import unpin as ipfs_unpin
+        for cid in restored_cids:
+            ipfs_unpin(cid)
+        current_managed = {
+            path
+            for path in key_root.iterdir()
+            if path.is_file() and _KEY_FILE.fullmatch(path.name)
+        }
+
+        for path in current_managed - set(original_files):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+        for path, original in original_files.items():
+            if original is None:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                _atomic_write(path, original)
+
+        if original_locator is None:
+            try:
+                locator_path.unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            _atomic_write(locator_path, original_locator)
+
+        if original_he_locator is None:
+            he_locator_path.unlink(missing_ok=True)
+        else:
+            _atomic_write(he_locator_path, original_he_locator)
+
+        raise
+
+    return {
+        "restoredKeyFiles": len(targets),
+        "restoredPrivateLocators": len(locators),
+        "verifiedDatasets": verified,
+        **ipfs_recovery,
+    }

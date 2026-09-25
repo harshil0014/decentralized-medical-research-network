@@ -2,24 +2,56 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, File, Form
+from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, File, Form, Query
 from pydantic import BaseModel
 
 from backend.api_auth import (
-    authenticated_role,
+    AuthIdentity,
+    authenticated_identity,
+    researcher_org,
     require_authenticated,
     require_hospital,
     require_researcher,
 )
+from backend.researcher_signing import verify_researcher_signature
 
 from backend.frontend_ui import router as frontend_router
+from backend.data_backup import (
+    backup_encrypted_dataset,
+    delete_dataset_backup,
+    stage_replacement_backup,
+    promote_replacement_backup,
+    _backup_root,
+    _atomic_write,
+)
 from backend.runtime_security import (
     SecurityHeadersMiddleware,
     require_mutation_lock,
+)
+
+from backend.recovery import (
+    export_recovery_bundle,
+    migrate_recovery_bundle,
+    recovery_backup_path,
+    restore_recovery_bundle,
+    snapshot_recovery_bundle,
+)
+
+from backend.secure_temp import (
+    create_secure_plaintext_temp,
+    require_staging_capacity,
+    secure_plaintext_temp_root,
+)
+from backend.ipfs_storage import (
+    add_file as ipfs_add_file,
+    cat as ipfs_cat,
+    health as ipfs_health,
+    unpin as ipfs_unpin,
 )
 
 from backend.storage_crypto import (
@@ -51,14 +83,76 @@ app.include_router(frontend_router)
 
 REPO = Path(__file__).resolve().parents[1]
 
-class AccessRequestInput(BaseModel):
-    request_id: str
+# FastAPI/Starlette may spool multipart uploads before endpoint code runs.
+# Force Python's process-wide tempfile directory onto verified RAM-backed
+# storage so large medical uploads never spill onto the ordinary disk.
+_SECURE_PLAINTEXT_TMP = secure_plaintext_temp_root()
+for _temp_env in ("TMPDIR", "TMP", "TEMP"):
+    os.environ[_temp_env] = str(_SECURE_PLAINTEXT_TMP)
+tempfile.tempdir = str(_SECURE_PLAINTEXT_TMP)
+
+OPAQUE_DATASET_ID_PATTERN = re.compile(r"^ds-[0-9a-f]{32}$")
+OPAQUE_REQUEST_ID_PATTERN = re.compile(r"^req-[0-9a-f]{32}$")
+DATA_TYPE_PATTERN = re.compile(r"^[A-Z0-9_:-]{1,64}$")
+CSV_INPUT_TYPES = {"CSV", "LAB_CSV", "NUMERIC_CSV"}
+
+
+def _plaintext_downloads_enabled() -> bool:
+    return os.getenv(
+        "MEDICAL_ALLOW_PLAINTEXT_DOWNLOADS",
+        "",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _opaque_dataset_id() -> str:
+    return "ds-" + uuid.uuid4().hex
+
+
+def _opaque_request_id() -> str:
+    return "req-" + uuid.uuid4().hex
+
+
+def _validate_opaque_dataset_id(value: str) -> str:
+    clean = (value or "").strip()
+    if not OPAQUE_DATASET_ID_PATTERN.fullmatch(clean):
+        raise HTTPException(
+            status_code=400,
+            detail="dataset_id must be an opaque server-issued ds- identifier",
+        )
+    return clean
+
+
+def _public_text_commitment(value: str, label: str) -> str:
+    clean = (value or "").strip()
+    if not clean:
+        raise HTTPException(status_code=400, detail=f"{label} is required")
+    if len(clean) > 4096:
+        raise HTTPException(status_code=400, detail=f"{label} is too long")
+    return "sha256:" + hashlib.sha256(clean.encode("utf-8")).hexdigest()
+
+
+class AccessRequestPrepareInput(BaseModel):
     dataset_id: str
     purpose: str
 
 
+class AccessRequestInput(BaseModel):
+    request_id: str
+    dataset_id: str
+    purpose: str
+    signature: str
+
+
 class ConsentUpdateInput(BaseModel):
     consent_state: str
+
+
+def _verify_researcher_signature(
+    identity: AuthIdentity,
+    digest: str,
+    signature: str,
+) -> None:
+    verify_researcher_signature(identity, digest, signature)
 
 
 def _public_request_record(raw: str):
@@ -71,13 +165,15 @@ def _public_request_record(raw: str):
     if record.get("decidedByAddress"):
         record["decidedByRole"] = "Hospital"
         record.pop("decidedBy", None)
-    elif record.get("decidedBy") == "Org1MSP":
+    elif record.get("decidedBy") == "Hospital":
         record["decidedByRole"] = "Hospital"
         record.pop("decidedBy", None)
     return record
 
 
 from backend.ethereum_ledger import (
+    account_address as ethereum_account_address,
+    deployment_chain_id as ethereum_deployment_chain_id,
     health as ethereum_health,
     invoke as ethereum_invoke,
     invoke_private_org1 as ethereum_invoke_private_org1,
@@ -103,32 +199,38 @@ def invoke_private_org1(
 
 @app.get("/health")
 def health():
-    result = subprocess.run(
-        ["docker", "inspect", "-f", "{{.State.Health.Status}}", "medical-ipfs"],
-        text=True,
-        capture_output=True,
-    )
-    ipfs = result.stdout.strip() if result.returncode == 0 else "unavailable"
+    return {"status": "ok"}
+
+
+@app.get("/admin/diagnostics", dependencies=[Depends(require_hospital)])
+def hospital_diagnostics():
     chain = ethereum_health()
     return {
         "status": "ok",
         "blockchain": "ethereum",
         "ethereum": chain,
-        "ipfs": ipfs,
+        "ipfs": ipfs_health(),
     }
 
 
 @app.get("/auth/me")
 def auth_me(
-    role: str = Depends(
-        authenticated_role
-    ),
+    identity: AuthIdentity = Depends(authenticated_identity),
 ):
-    return {
+    result = {
         "authenticated": True,
-        "role": role,
-        "authMode": "service-token",
+        "role": identity.role,
+        "authMode": "service-token + external-wallet-signature",
+        "plaintextDownloadsEnabled": _plaintext_downloads_enabled(),
     }
+
+    if identity.role == "researcher":
+        org = researcher_org(identity)
+        result["researcherId"] = identity.researcher_id
+        result["ethereumAddress"] = ethereum_account_address(org)
+        result["ethereumChainId"] = ethereum_deployment_chain_id()
+
+    return result
 
 
 @app.post("/datasets/upload", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
@@ -137,6 +239,7 @@ def upload_dataset(
     data_type: str | None = Form(None),
     metadata_summary: str | None = Form(None),
     consent_state: str = Form("ACTIVE"),
+    visual_phi_reviewed: bool = Form(False),
     file: UploadFile = File(...),
 ):
     temp_path = None
@@ -148,7 +251,7 @@ def upload_dataset(
     # Registration is now a three-stage Ethereum transaction:
     #
     # 1. public PRIVATE_PENDING record
-    # 2. Org1-only transient CID/SHA -> implicit private collection
+    # 2. Hospital private CID/SHA locator
     # 3. public PRIVATE_READY finalization
     #
     # Once stage 1 has definitely committed, local encrypted
@@ -157,6 +260,12 @@ def upload_dataset(
     public_registered = False
     ledger_registered = False
     preserve_assets = False
+
+    client_dataset_label = (dataset_id or "").strip()
+    dataset_id = _opaque_dataset_id()
+
+    # Fail before any durable mutation if disaster recovery is not configured.
+    recovery_backup_path()
 
     try:
         already_exists = (
@@ -178,13 +287,22 @@ def upload_dataset(
 
         suffix = Path(file.filename or "upload.bin").suffix
 
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=suffix,
-        ) as tmp:
-            temp_path = tmp.name
-            sha256 = hashlib.sha256()
+        file.file.seek(0, os.SEEK_END)
+        upload_size = file.file.tell()
+        file.file.seek(0)
+        try:
+            require_staging_capacity(upload_size * 4 + 8 * 1024 * 1024)
+        except ValueError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
 
+        # Medical plaintext never stages on the ordinary filesystem.
+        # This path is verified to be RAM-backed (tmpfs/ramfs).
+        temp_path = create_secure_plaintext_temp(
+            suffix=suffix,
+        )
+        sha256 = hashlib.sha256()
+
+        with open(temp_path, "wb") as tmp:
             while True:
                 chunk = file.file.read(1024 * 1024)
                 if not chunk:
@@ -193,7 +311,18 @@ def upload_dataset(
                 sha256.update(chunk)
                 tmp.write(chunk)
 
+            tmp.flush()
+            os.fsync(tmp.fileno())
+
         digest = sha256.hexdigest()
+
+        # The caller-supplied label is intentionally never written to Ethereum.
+        # Ethereum receives only the opaque server-generated dataset ID.
+        if len(client_dataset_label) > 256:
+            raise HTTPException(
+                status_code=400,
+                detail="dataset label is too long",
+            )
 
         # DICOM series ZIPs are de-identified BEFORE hashing and BEFORE IPFS storage.
         if suffix.lower() == ".zip":
@@ -201,7 +330,10 @@ def upload_dataset(
                 from backend.dicom_series import deidentify_dicom_series_zip
                 from backend.dicom_utils import sha256_file
 
-                safe_metadata = deidentify_dicom_series_zip(temp_path)
+                safe_metadata = deidentify_dicom_series_zip(
+                    temp_path,
+                    visual_phi_reviewed=visual_phi_reviewed,
+                )
             except Exception as exc:
                 raise HTTPException(
                     status_code=400,
@@ -213,8 +345,6 @@ def upload_dataset(
             parts = ["De-identified DICOM series"]
             for key in (
                 "modality",
-                "study_description",
-                "series_description",
                 "rows",
                 "columns",
                 "slice_count",
@@ -226,18 +356,17 @@ def upload_dataset(
             metadata_summary = "; ".join(parts)
 
             modality = safe_metadata.get("modality")
-            data_type = (
-                f"DICOM_SERIES_{modality}"
-                if modality
-                else "DICOM_SERIES"
-            )
+            data_type = "DICOM"
 
         # DICOM files are de-identified BEFORE hashing and BEFORE IPFS storage.
         elif suffix.lower() in {".dcm", ".dicom"}:
             from backend.dicom_utils import deidentify_dicom_in_place, sha256_file
 
             try:
-                safe_metadata = deidentify_dicom_in_place(temp_path)
+                safe_metadata = deidentify_dicom_in_place(
+                    temp_path,
+                    visual_phi_reviewed=visual_phi_reviewed,
+                )
             except Exception as exc:
                 raise HTTPException(
                     status_code=400,
@@ -249,8 +378,6 @@ def upload_dataset(
             parts = ["De-identified DICOM"]
             for key in (
                 "modality",
-                "study_description",
-                "series_description",
                 "rows",
                 "columns",
             ):
@@ -260,8 +387,8 @@ def upload_dataset(
 
             metadata_summary = "; ".join(parts)
 
-            modality = safe_metadata.get("modality")
-            data_type = f"DICOM_{modality}" if modality else "DICOM"
+            modality = str(safe_metadata.get("modality") or "").upper()
+            data_type = "DICOM_SEG" if modality == "SEG" else "DICOM"
 
         if not data_type:
             raise HTTPException(
@@ -269,11 +396,30 @@ def upload_dataset(
                 detail="data_type is required for non-DICOM uploads",
             )
 
+        data_type = data_type.strip().upper()
+        if not DATA_TYPE_PATTERN.fullmatch(data_type):
+            raise HTTPException(
+                status_code=400,
+                detail="data_type must use only A-Z, 0-9, _, : or -",
+            )
+        if suffix.lower() not in {".zip", ".dcm", ".dicom"}:
+            if data_type not in CSV_INPUT_TYPES:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Non-DICOM demo uploads support CSV data only",
+                )
+            data_type = "CSV"
+
         if not metadata_summary:
             raise HTTPException(
                 status_code=400,
                 detail="metadata_summary is required for non-DICOM uploads",
             )
+
+        ledger_metadata_summary = _public_text_commitment(
+            metadata_summary,
+            "metadata_summary",
+        )
 
         # Encrypt the final de-identified/validated medical object
         # before it ever enters IPFS.
@@ -291,48 +437,20 @@ def upload_dataset(
             Path(encrypted_path),
         )
 
-        container_path = (
-            f"/tmp/medical-upload-{uuid.uuid4().hex}.medaes"
-        )
+        cid = ipfs_add_file(encrypted_path)
 
-        copied = subprocess.run(
-            [
-                "docker",
-                "cp",
-                encrypted_path,
-                f"medical-ipfs:{container_path}",
-            ],
-            text=True,
-            capture_output=True,
-        )
-
-        if copied.returncode != 0:
-            raise HTTPException(
-                status_code=502,
-                detail=copied.stderr.strip() or "Failed to copy file into IPFS node",
+        try:
+            backup_encrypted_dataset(
+                dataset_id,
+                Path(encrypted_path),
+                cid,
+                digest,
             )
-
-        added = subprocess.run(
-            [
-                "docker",
-                "exec",
-                "medical-ipfs",
-                "ipfs",
-                "add",
-                "-Q",
-                container_path,
-            ],
-            text=True,
-            capture_output=True,
-        )
-
-        if added.returncode != 0:
+        except Exception as exc:
             raise HTTPException(
-                status_code=502,
-                detail=added.stderr.strip() or "IPFS add failed",
-            )
-
-        cid = added.stdout.strip()
+                status_code=503,
+                detail="Encrypted-object backup failed before ledger registration",
+            ) from exc
 
         # ====================================================
         # STAGE 1
@@ -347,7 +465,7 @@ def upload_dataset(
                 [
                     dataset_id,
                     data_type,
-                    metadata_summary,
+                    ledger_metadata_summary,
                     consent_state,
                 ],
                 "org1",
@@ -404,7 +522,7 @@ def upload_dataset(
 
             if (
                 pending.get("datasetId") != dataset_id
-                or pending.get("ownerOrg") != "Org1MSP"
+                or pending.get("ownerOrg") != "Hospital"
                 or pending.get("storageState")
                 != "PRIVATE_PENDING"
             ):
@@ -429,7 +547,7 @@ def upload_dataset(
 
         # ====================================================
         # STAGE 2
-        # CID/SHA go only through transient data to Org1's
+        # CID/SHA remain in the Hospital private locator store
         # implicit private collection.
         # ====================================================
 
@@ -640,6 +758,19 @@ def upload_dataset(
 
         record["uploadedFilename"] = file.filename
         record["storageEncryption"] = "AES-256-GCM"
+
+        try:
+            record["recoveryBackup"] = snapshot_recovery_bundle()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "Dataset committed, but recovery snapshot failed",
+                    "datasetId": dataset_id,
+                    "action": "Repair the recovery destination and create a snapshot before further mutations",
+                },
+            ) from exc
+
         return record
 
     finally:
@@ -652,24 +783,17 @@ def upload_dataset(
             and not preserve_assets
         ):
             if cid:
-                subprocess.run(
-                    [
-                        "docker",
-                        "exec",
-                        "medical-ipfs",
-                        "ipfs",
-                        "pin",
-                        "rm",
-                        cid,
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
+                ipfs_unpin(cid)
 
             if key_existed_before is False:
                 delete_dataset_key(
                     dataset_id
                 )
+
+            try:
+                delete_dataset_backup(dataset_id)
+            except Exception:
+                pass
 
         if temp_path:
             try:
@@ -683,16 +807,11 @@ def upload_dataset(
             except FileNotFoundError:
                 pass
 
-        if container_path:
-            subprocess.run(
-                ["docker", "exec", "medical-ipfs", "rm", "-f", container_path],
-                capture_output=True,
-            )
 
 
 @app.get("/datasets", dependencies=[Depends(require_authenticated)])
-def list_datasets():
-    raw = query("GetAllDatasets", [], "org2")
+def list_datasets(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)):
+    raw = query("GetAllDatasets", [str(offset), str(limit)], "org2")
     records = json.loads(raw)
 
     # Researcher-facing discovery metadata only.
@@ -710,23 +829,19 @@ def list_datasets():
             "updatedAt": r["updatedAt"],
         }
         for r in records
-        if (
-            r.get("consentState") == "ACTIVE"
-            and r.get(
-                "storageState",
-                "LEGACY_PUBLIC",
-            )
-            in {
-                "LEGACY_PUBLIC",
-                "PRIVATE_READY",
-            }
-        )
+        if r.get("consentState") == "ACTIVE"
+        and r.get("storageState") == "PRIVATE_READY"
     ]
 
 
+@app.get("/datasets/count", dependencies=[Depends(require_authenticated)])
+def dataset_count():
+    return {"count": int(query("DatasetCount", [], "org2"))}
+
+
 @app.get("/datasets/{dataset_id}/history", dependencies=[Depends(require_authenticated)])
-def get_dataset_history(dataset_id: str):
-    raw = query("GetDatasetHistory", [dataset_id], "org2")
+def get_dataset_history(dataset_id: str, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)):
+    raw = query("GetDatasetHistory", [dataset_id, str(offset), str(limit)], "org2")
     history = json.loads(raw)
 
     safe_history = []
@@ -773,6 +888,9 @@ def update_dataset_consent(dataset_id: str, body: ConsentUpdateInput):
 def rotate_dataset_encryption_key(
     dataset_id: str,
 ):
+    # Fail before generating a new key generation if recovery is not configured.
+    recovery_backup_path()
+
     dataset = json.loads(
         query(
             "ReadDatasetPrivate",
@@ -783,7 +901,7 @@ def rotate_dataset_encryption_key(
 
     if dataset.get(
         "ownerOrg"
-    ) != "Org1MSP":
+    ) != "Hospital":
         raise HTTPException(
             status_code=403,
             detail=(
@@ -904,6 +1022,19 @@ def rotate_dataset_encryption_key(
         dataset_id
     )
 
+    try:
+        recovery = snapshot_recovery_bundle()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Key rotation committed, but recovery snapshot failed",
+                "datasetId": dataset_id,
+                "activeKeyVersion": new_version,
+                "action": "Repair the recovery destination and create a snapshot before further rotations",
+            },
+        ) from exc
+
     return {
         "datasetId": dataset_id,
         "previousKeyVersion": previous_version,
@@ -911,19 +1042,281 @@ def rotate_dataset_encryption_key(
             "activeKeyVersion"
         ],
         "ethereumAudit": audit,
+        "recoveryBackup": recovery,
     }
 
 
-@app.post("/requests", dependencies=[Depends(require_researcher), Depends(require_mutation_lock)])
-def create_request(body: AccessRequestInput):
-    invoke(
-        "RequestAccess",
-        [body.request_id, body.dataset_id, body.purpose],
-        "org2",
+@app.post("/datasets/{dataset_id}/remediate-key", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
+def remediate_compromised_dataset_key(dataset_id: str):
+    """Replace active ciphertext under a fresh key while retaining old pins until durable commit."""
+    recovery_backup_path()
+    journal_path = _backup_root() / f"{dataset_id}.remediation.json"
+    if not re.fullmatch(r"ds-[0-9a-f]{32}", dataset_id):
+        raise HTTPException(status_code=400, detail="Invalid dataset ID")
+
+    if journal_path.exists():
+        journal = json.loads(journal_path.read_text())
+    else:
+        current = json.loads(query("ReadDatasetPrivate", [dataset_id], "org1"))
+        if current.get("storageState") != "PRIVATE_READY":
+            raise HTTPException(status_code=409, detail="Dataset storage is not ready")
+        old_ciphertext = ipfs_cat(current["cid"])
+        if sha256_bytes(old_ciphertext) != current["sha256"] or not is_encrypted_dataset(old_ciphertext):
+            raise HTTPException(status_code=409, detail="Active encrypted dataset integrity failed")
+        plaintext = decrypt_bytes(dataset_id, old_ciphertext)
+        require_staging_capacity(len(plaintext) * 3 + 8 * 1024 * 1024)
+        before = load_dataset_key_metadata(dataset_id)
+        previous_version = int(before["activeKeyVersion"])
+        plain_path = create_secure_plaintext_temp()
+        encrypted_path = plain_path + ".medaes"
+        new_cid = None
+        rotated = False
+        try:
+            Path(plain_path).write_bytes(plaintext)
+            rotate_dataset_key(dataset_id)
+            rotated = True
+            new_version = previous_version + 1
+            new_sha = encrypt_file(dataset_id, Path(plain_path), Path(encrypted_path))
+            new_cid = ipfs_add_file(encrypted_path)
+            replicated = ipfs_cat(new_cid)
+            if sha256_bytes(replicated) != new_sha or decrypt_bytes(dataset_id, replicated) != plaintext:
+                raise RuntimeError("Replacement ciphertext verification failed")
+            stage_replacement_backup(dataset_id, Path(encrypted_path), new_cid, new_sha)
+            from backend.ethereum_ledger import _locator_commitment
+            from web3 import Web3
+            old_commitment = current["locatorCommitment"]
+            new_commitment = Web3.to_hex(_locator_commitment(new_cid, new_sha))
+            journal = {
+                "datasetId": dataset_id, "oldCid": current["cid"],
+                "oldSha256": current["sha256"], "newCid": new_cid,
+                "newSha256": new_sha, "oldCommitment": old_commitment,
+                "newCommitment": new_commitment,
+                "previousKeyVersion": previous_version,
+                "newKeyVersion": new_version,
+            }
+            _atomic_write(journal_path, (json.dumps(journal, sort_keys=True) + "\n").encode())
+        except Exception:
+            if not journal_path.exists():
+                if new_cid:
+                    ipfs_unpin(new_cid)
+                if rotated:
+                    rollback_dataset_key_rotation(dataset_id, previous_version, previous_version + 1)
+            raise
+        finally:
+            Path(plain_path).unlink(missing_ok=True)
+            Path(encrypted_path).unlink(missing_ok=True)
+
+    try:
+        public = json.loads(query("ReadDataset", [dataset_id], "org1"))
+        actual_commitment = public["locatorCommitment"].lower()
+        if actual_commitment == journal["oldCommitment"].lower():
+            try:
+                invoke("ReplaceDatasetCiphertext", [
+                    dataset_id, journal["oldCommitment"], journal["newCommitment"],
+                    str(journal["previousKeyVersion"]), str(journal["newKeyVersion"]),
+                ], "org1")
+            except HTTPException:
+                # The RPC response can be lost after commit. Preserve both
+                # ciphertext copies and reconcile on the next invocation.
+                pass
+            public = json.loads(query("ReadDataset", [dataset_id], "org1"))
+            actual_commitment = public["locatorCommitment"].lower()
+        if actual_commitment != journal["newCommitment"].lower():
+            raise HTTPException(status_code=503, detail={
+                "message": "Replacement transaction is unconfirmed",
+                "action": "Retry this remediation endpoint after checking ledger state",
+            })
+
+        invoke_private_org1("StoreDatasetLocatorPrivate", [dataset_id], {
+            "dataset_locator": {"cid": journal["newCid"], "sha256": journal["newSha256"]},
+        })
+        # Re-stage from replicated ciphertext so an interrupted promotion can
+        # resume even if the first staged file was already moved.
+        replicated = ipfs_cat(journal["newCid"])
+        if sha256_bytes(replicated) != journal["newSha256"]:
+            raise RuntimeError("Replacement IPFS object integrity failed")
+        staged_path = create_secure_plaintext_temp(suffix=".medaes")
+        try:
+            Path(staged_path).write_bytes(replicated)
+            stage_replacement_backup(dataset_id, Path(staged_path), journal["newCid"], journal["newSha256"])
+            promote_replacement_backup(dataset_id, journal["newCid"], journal["newSha256"])
+        finally:
+            Path(staged_path).unlink(missing_ok=True)
+        recovery = snapshot_recovery_bundle()
+        ipfs_unpin(journal["oldCid"])
+        journal_path.unlink(missing_ok=True)
+        return {
+            "datasetId": dataset_id, "previousKeyVersion": journal["previousKeyVersion"],
+            "activeKeyVersion": journal["newKeyVersion"], "storageState": "PRIVATE_READY",
+            "locatorCommitment": journal["newCommitment"], "recoveryBackup": recovery,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={
+            "message": "Replacement is staged or committed but finalization is incomplete",
+            "action": "Retry the remediation endpoint; do not remove either encrypted copy",
+        }) from exc
+
+
+@app.post("/admin/recovery/snapshot", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
+def create_recovery_snapshot():
+    try:
+        return snapshot_recovery_bundle()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Recovery snapshot failed; check Hospital diagnostics",
+        ) from exc
+
+
+@app.get("/admin/recovery/export", dependencies=[Depends(require_hospital)])
+def export_recovery_snapshot():
+    try:
+        bundle = export_recovery_bundle()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Recovery export failed; check Hospital diagnostics",
+        ) from exc
+
+    return Response(
+        content=bundle,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": 'attachment; filename="medical-recovery.medrec"',
+            "X-Recovery-Sha256": hashlib.sha256(bundle).hexdigest(),
+        },
     )
 
-    raw = query("ReadAccessRequest", [body.request_id], "org2")
-    return _public_request_record(raw)
+
+@app.post("/admin/recovery/restore", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
+def restore_recovery_snapshot(
+    backup: UploadFile = File(...),
+    replace_existing: bool = Form(False),
+):
+    try:
+        bundle = backup.file.read(64 * 1024 * 1024 + 1)
+        if len(bundle) > 64 * 1024 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail="Recovery bundle exceeds 64 MiB",
+            )
+
+        result = restore_recovery_bundle(
+            bundle,
+            replace_existing=replace_existing,
+        )
+        result["recoveryBackup"] = snapshot_recovery_bundle()
+        return result
+
+    except HTTPException:
+        raise
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Recovery restore failed; verify backup and deployment state",
+        ) from exc
+
+
+@app.post("/admin/recovery/migrate", dependencies=[Depends(require_hospital), Depends(require_mutation_lock)])
+def migrate_recovery_snapshot(
+    backup: UploadFile = File(...),
+    source_rpc_url: str = Form(...),
+    source_chain_id: int = Form(...),
+    source_contract_address: str = Form(...),
+):
+    bundle = backup.file.read(64 * 1024 * 1024 + 1)
+    if len(bundle) > 64 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Migration bundle exceeds 64 MiB")
+    try:
+        return migrate_recovery_bundle(
+            bundle, source_rpc_url=source_rpc_url,
+            source_chain_id=source_chain_id,
+            source_contract_address=source_contract_address,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=(
+            "Migration is incomplete; preserve source backup and retry after checking destination ledger state"
+        )) from exc
+
+
+@app.post("/requests/prepare")
+def prepare_request_signature(
+    body: AccessRequestPrepareInput,
+    identity: AuthIdentity = Depends(require_researcher),
+):
+    request_id = _opaque_request_id()
+    dataset_id = _validate_opaque_dataset_id(body.dataset_id)
+    purpose_commitment = _public_text_commitment(body.purpose, "purpose")
+    actor_org = researcher_org(identity)
+
+    digest = query(
+        "ResearcherRequestDigest",
+        [request_id, dataset_id, purpose_commitment],
+        actor_org,
+    )
+
+    return {
+        "requestId": request_id,
+        "datasetId": dataset_id,
+        "purposeCommitment": purpose_commitment,
+        "signingDigest": digest,
+        "ethereumAddress": identity.wallet_address,
+        "signatureScheme": "EIP-191 personal_sign",
+    }
+
+
+@app.post("/requests", dependencies=[Depends(require_mutation_lock)])
+def create_request(
+    body: AccessRequestInput,
+    identity: AuthIdentity = Depends(require_researcher),
+):
+    request_id = body.request_id.strip()
+    if not OPAQUE_REQUEST_ID_PATTERN.fullmatch(request_id):
+        raise HTTPException(
+            status_code=400,
+            detail="request_id must be the opaque value returned by /requests/prepare",
+        )
+    dataset_id = _validate_opaque_dataset_id(body.dataset_id)
+    purpose_commitment = _public_text_commitment(body.purpose, "purpose")
+    actor_org = researcher_org(identity)
+
+    digest = query(
+        "ResearcherRequestDigest",
+        [request_id, dataset_id, purpose_commitment],
+        actor_org,
+    )
+    _verify_researcher_signature(
+        identity,
+        digest,
+        body.signature,
+    )
+
+    invoke(
+        "RequestAccessSigned",
+        [request_id, dataset_id, purpose_commitment, identity.wallet_address, body.signature],
+        "org1",
+    )
+
+    raw = query("ReadAccessRequest", [request_id], actor_org)
+    record = _public_request_record(raw)
+    if str(record.get("requesterAddress") or "").lower() != (
+        identity.wallet_address or ""
+    ).lower():
+        raise HTTPException(
+            status_code=409,
+            detail="Ethereum researcher identity does not match authenticated wallet",
+        )
+    record["researcherId"] = identity.researcher_id
+    return record
 
 
 @app.get("/requests/{request_id}", dependencies=[Depends(require_authenticated)])
@@ -948,12 +1341,28 @@ def revoke_request(request_id: str):
     return json.loads(raw)
 
 
-@app.get("/requests/{request_id}/download", dependencies=[Depends(require_researcher)])
-def download_dataset(request_id: str):
+@app.get("/requests/{request_id}/download")
+def download_dataset(
+    request_id: str,
+    identity: AuthIdentity = Depends(require_researcher),
+):
+    if not _plaintext_downloads_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Plaintext dataset downloads are disabled by default; "
+                "use the homomorphic-encryption workflow or explicitly set "
+                "MEDICAL_ALLOW_PLAINTEXT_DOWNLOADS=true for a controlled demo"
+            ),
+        )
+
+    actor_org = researcher_org(identity)
+    actor_address = ethereum_account_address(actor_org).lower()
+
     allowed = query(
         "CanAccess",
         [request_id],
-        "org2",
+        actor_org,
     )
 
     if allowed != "true":
@@ -966,9 +1375,15 @@ def download_dataset(request_id: str):
         query(
             "ReadAccessRequest",
             [request_id],
-            "org2",
+            actor_org,
         )
     )
+
+    if str(request_data.get("requesterAddress") or "").lower() != actor_address:
+        raise HTTPException(
+            status_code=403,
+            detail="Access request belongs to a different researcher identity",
+        )
 
     dataset_data = json.loads(
         query(
@@ -980,25 +1395,13 @@ def download_dataset(request_id: str):
 
     cid = dataset_data["cid"]
 
-    result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "medical-ipfs",
-            "ipfs",
-            "cat",
-            cid,
-        ],
-        capture_output=True,
-    )
-
-    if result.returncode != 0:
+    try:
+        stored_bytes = ipfs_cat(cid, timeout=180)
+    except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail="IPFS retrieval failed",
-        )
-
-    stored_bytes = result.stdout
+            detail="IPFS retrieval failed on every configured peer",
+        ) from exc
 
     # Ethereum ledger stores the SHA-256 of the exact object placed in IPFS.
     actual_sha256 = sha256_bytes(
@@ -1017,34 +1420,29 @@ def download_dataset(request_id: str):
             ),
         )
 
-    if is_encrypted_dataset(stored_bytes):
-        try:
-            content = decrypt_bytes(
-                dataset_data["datasetId"],
-                stored_bytes,
-            )
-        except FileNotFoundError as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Hospital dataset encryption key is unavailable"
-                ),
-            ) from exc
-        except Exception as exc:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "AES-GCM dataset authentication failed"
-                ),
-            ) from exc
+    if not is_encrypted_dataset(stored_bytes):
+        raise HTTPException(
+            status_code=409,
+            detail="Unencrypted legacy dataset objects are not supported",
+        )
 
-        storage_encryption = "AES-256-GCM"
+    try:
+        content = decrypt_bytes(
+            dataset_data["datasetId"],
+            stored_bytes,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Hospital dataset encryption key is unavailable",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="AES-GCM dataset authentication failed",
+        ) from exc
 
-    else:
-        # Backward compatibility only for datasets registered
-        # before encrypted-at-rest storage was introduced.
-        content = stored_bytes
-        storage_encryption = "LEGACY-PLAINTEXT"
+    storage_encryption = "AES-256-GCM"
 
     return Response(
         content=content,
@@ -1061,3 +1459,5 @@ def download_dataset(request_id: str):
 # Microsoft SEAL homomorphic-encryption API
 from backend.he_api import router as he_router
 app.include_router(he_router)
+from backend.dicom_he_api import router as dicom_he_router
+app.include_router(dicom_he_router)

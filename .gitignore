@@ -34,5 +34,18 @@ seal_demo/research_exchange/
 ethereum/node_modules/
 ethereum/build/
 ethereum/deployment.json
+.runtime/
 *.ganache-db/
 ethereum_private_locators.json
+# Never commit real hospital / patient DICOM data
+private_dicom/
+hospital_dicom/
+real_dicom/
+*.dcm
+*.dicom
+
+
+# Local authentication / recovery material
+*.token
+researchers.json
+*.medrec

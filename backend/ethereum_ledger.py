@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import fcntl
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -29,12 +31,64 @@ PRIVATE_LOCATOR_PATH = Path(
         str(AUTH_ROOT / "ethereum_private_locators.json"),
     )
 )
+HE_LOCATOR_PATH = Path(
+    os.environ.get("MEDICAL_ETHEREUM_HE_LOCATORS", str(AUTH_ROOT / "ethereum_he_locators.json"))
+)
+
+
+class _FailoverHTTPProvider(Web3.HTTPProvider):
+    """Retry transport failures against configured RPC replicas."""
+
+    def __init__(self, urls: list[str], expected_chain_id: int | None):
+        super().__init__(urls[0], request_kwargs={"timeout": 10})
+        self._replicas = [
+            Web3.HTTPProvider(url, request_kwargs={"timeout": 10})
+            for url in urls
+        ]
+        self._active = 0
+        self._expected_chain_id = expected_chain_id
+        self._validated: set[int] = set()
+
+    def make_request(self, method, params):
+        last_error = None
+        for offset in range(len(self._replicas)):
+            index = (self._active + offset) % len(self._replicas)
+            try:
+                if self._expected_chain_id is not None and index not in self._validated:
+                    chain = self._replicas[index].make_request("eth_chainId", [])
+                    if int(chain.get("result", "0x0"), 16) != self._expected_chain_id:
+                        raise RuntimeError("Ethereum RPC chain ID differs from deployment")
+                    self._validated.add(index)
+                response = self._replicas[index].make_request(method, params)
+            except Exception as exc:
+                last_error = exc
+                continue
+            self._active = index
+            return response
+        raise RuntimeError("All Ethereum RPC endpoints are unavailable") from last_error
 
 
 def _http_error(action: str, exc: Exception) -> HTTPException:
+    message = str(exc).lower()
+    if "revert" in message:
+        for reason, status in (
+            ("dataset missing", 404), ("request missing", 404),
+            ("he job missing", 404), ("rotation missing", 404),
+            ("hospital only", 403), ("signature mismatch", 403),
+            ("signature required", 403), ("access no longer active", 403),
+            ("access not active", 403), ("request not approved", 403),
+            ("dataset exists", 409), ("request exists", 409),
+            ("he job exists", 409), ("dataset not pending", 409),
+            ("dataset not ready", 409), ("request already terminal", 409),
+            ("he job not encrypted", 409), ("he job not computed", 409),
+            ("locator changed", 409), ("rotation exists", 409),
+            ("invalid", 400), ("required", 400),
+        ):
+            if reason in message:
+                return HTTPException(status_code=status, detail=reason)
     return HTTPException(
-        status_code=500,
-        detail=f"Ethereum {action} failed: {exc}",
+        status_code=503,
+        detail=f"Ethereum {action} is unavailable or transaction state is uncertain; check ledger state before retrying",
     )
 
 
@@ -51,7 +105,6 @@ def _deployment() -> dict[str, Any]:
         "rpcUrl",
         "contractAddress",
         "hospitalAddress",
-        "researcherAddress",
         "abiPath",
     }
     missing = sorted(required - data.keys())
@@ -66,9 +119,16 @@ def _deployment() -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def _web3() -> Web3:
     data = _deployment()
-    w3 = Web3(Web3.HTTPProvider(data["rpcUrl"], request_kwargs={"timeout": 30}))
+    configured = os.environ.get("MEDICAL_ETHEREUM_RPC_URLS", "")
+    urls = [url.strip() for url in configured.split(",") if url.strip()]
+    if not urls:
+        urls = [data["rpcUrl"]]
+    expected_chain_id = int(data["chainId"]) if data.get("chainId") is not None else None
+    w3 = Web3(_FailoverHTTPProvider(urls, expected_chain_id))
     if not w3.is_connected():
-        raise RuntimeError(f"Cannot connect to Ethereum RPC at {data['rpcUrl']}")
+        raise RuntimeError("Cannot connect to any configured Ethereum RPC")
+    if data.get("chainId") is not None and w3.eth.chain_id != int(data["chainId"]):
+        raise RuntimeError("Ethereum RPC chain ID differs from deployment")
     return w3
 
 
@@ -87,20 +147,65 @@ def _contract():
 
 def _account(org: str) -> str:
     data = _deployment()
+
     if org == "org1":
         return Web3.to_checksum_address(data["hospitalAddress"])
+
     if org == "org2":
-        return Web3.to_checksum_address(data["researcherAddress"])
+        # Read-only compatibility caller; no researcher transaction is ever
+        # signed by the backend.
+        return Web3.to_checksum_address(data["hospitalAddress"])
+
+    if org.startswith("researcher-address:"):
+        raw_address = org.split(":", 1)[1]
+        if not Web3.is_address(raw_address):
+            raise ValueError(f"Invalid researcher address role: {org}")
+        return Web3.to_checksum_address(raw_address)
+
     raise ValueError(f"Unknown role: {org}")
+
+
+def account_address(org: str) -> str:
+    return _account(org)
+
+
+def deployment_chain_id() -> int:
+    return int(_deployment()["chainId"])
+
+
+def _hospital_private_key() -> str | None:
+    key_file = os.environ.get("MEDICAL_HOSPITAL_PRIVATE_KEY_FILE", "").strip()
+    if not key_file:
+        return None
+
+    path = Path(key_file)
+    if not path.exists():
+        raise RuntimeError(f"Hospital Ethereum key file is missing: {path}")
+    if os.name == "posix" and (path.stat().st_mode & 0o077):
+        raise RuntimeError("Hospital Ethereum key file permissions are too broad")
+
+    value = path.read_text(encoding="utf-8").strip()
+    if not value.startswith("0x"):
+        value = "0x" + value
+    if len(value) != 66:
+        raise RuntimeError("Hospital Ethereum private key is invalid")
+
+    derived = _web3().eth.account.from_key(value).address
+    expected = _account("org1")
+    if derived.lower() != expected.lower():
+        raise RuntimeError(
+            "Hospital Ethereum private key does not match deployment authority"
+        )
+    return value
 
 
 def _org_name(address: str) -> str:
     data = _deployment()
     value = (address or "").lower()
+
     if value == data["hospitalAddress"].lower():
-        return "Org1MSP"
-    if value == data["researcherAddress"].lower():
-        return "Org2MSP"
+        return "Hospital"
+
     return address
 
 
@@ -136,6 +241,40 @@ def _save_locators(data: dict[str, dict[str, str]]) -> None:
 
 def _locator_commitment(cid: str, sha256: str):
     return Web3.keccak(text=f"{cid}:{sha256.lower()}")
+
+
+def _he_locator_commitment(cid: str) -> str:
+    return "sha256:" + hashlib.sha256(cid.encode("utf-8")).hexdigest()
+
+
+def _load_he_locators() -> dict:
+    if not HE_LOCATOR_PATH.exists():
+        return {}
+    data = json.loads(HE_LOCATOR_PATH.read_text())
+    if not isinstance(data, dict):
+        raise RuntimeError("Private HE locator store is invalid")
+    return data
+
+
+def _store_he_locator(job_id: str, name: str, cid: str) -> None:
+    HE_LOCATOR_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = HE_LOCATOR_PATH.with_suffix(".lock")
+    with open(lock_path, "a+") as lock_file:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            data = _load_he_locators()
+            entry = data.setdefault(job_id, {})
+            old = entry.get(name)
+            if old and old != cid:
+                raise RuntimeError("HE artifact locator already bound to another CID")
+            entry[name] = cid
+            temp = HE_LOCATOR_PATH.with_suffix(".tmp")
+            temp.write_text(json.dumps(data, sort_keys=True))
+            os.chmod(temp, 0o600)
+            os.replace(temp, HE_LOCATOR_PATH)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _dataset(row) -> dict[str, Any]:
@@ -181,55 +320,87 @@ def _rotation(row) -> dict[str, Any]:
     }
 
 
-def _he_job(row) -> dict[str, Any]:
+def _he_job(row, org: str = "org2", *, historical: bool = False) -> dict[str, Any]:
+    private = org == "org1" or (
+        org.startswith("researcher-address:")
+        and org.split(":", 1)[1].lower() == str(row[12]).lower()
+    )
+    locators = _load_he_locators().get(row[0], {}) if private else {}
+    ciphertext_cid = locators.get("ciphertextCid", "")
+    result_cid = locators.get("resultCid", "")
+    if ciphertext_cid and _he_locator_commitment(ciphertext_cid) != row[7]:
+        raise RuntimeError("HE ciphertext locator commitment mismatch")
+    if result_cid and _he_locator_commitment(result_cid) != row[9]:
+        if historical:
+            result_cid = ""
+        else:
+            raise RuntimeError("HE result locator commitment mismatch")
     return {
         "jobId": row[0],
         "datasetId": row[1],
         "requestId": row[2],
-        "metric": row[3],
-        "cohortSize": int(row[4]),
-        "ciphertextCid": row[5],
-        "ciphertextManifestSha256": row[6],
-        "resultCid": row[7],
-        "resultSha256": row[8],
-        "ownerOrg": _org_name(row[9]),
-        "ownerAddress": row[9],
-        "researcherOrg": _org_name(row[10]),
-        "researcherAddress": row[10],
-        "status": row[11],
-        "createdAt": _iso(row[12]),
-        "computedAt": _iso(row[13]),
-        "decryptedAt": _iso(row[14]),
+        "secondaryDatasetId": row[3],
+        "secondaryRequestId": row[4],
+        "metric": row[5],
+        "cohortSize": int(row[6]),
+        "ciphertextCid": ciphertext_cid,
+        "ciphertextLocatorCommitment": row[7],
+        "ciphertextManifestSha256": row[8],
+        "resultCid": result_cid,
+        "resultLocatorCommitment": row[9],
+        "resultSha256": row[10],
+        "ownerOrg": _org_name(row[11]),
+        "ownerAddress": row[11],
+        "researcherOrg": _org_name(row[12]),
+        "researcherAddress": row[12],
+        "status": row[13],
+        "createdAt": _iso(row[14]),
+        "computedAt": _iso(row[15]),
+        "decryptedAt": _iso(row[16]),
     }
 
 
 def _send(method: str, args: list[Any], org: str):
     try:
-        fn = getattr(_contract().functions, method)(*args)
-        sender = _account(org)
-        estimated_gas = fn.estimate_gas({"from": sender})
-        gas_limit = max(
-            estimated_gas * 2,
-            estimated_gas + 100_000,
-        )
-        tx_hash = fn.transact({
-            "from": sender,
-            "gas": gas_limit,
-        })
-        receipt = _web3().eth.wait_for_transaction_receipt(
-            tx_hash,
-            timeout=60,
-        )
-        if receipt.status != 1:
-            raise RuntimeError(
-                f"transaction reverted: {Web3.to_hex(tx_hash)}"
-            )
-        return receipt
+        # All relayed transactions share the Hospital signer. Hold a
+        # cross-process lock until confirmation so another worker cannot
+        # reuse a pending nonce or read a stale nonce from a failover RPC.
+        AUTH_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_path = AUTH_ROOT / "ethereum-transactions.lock"
+        with open(lock_path, "a+") as lock_file:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                w3 = _web3()
+                fn = getattr(_contract().functions, method)(*args)
+                sender = _account(org)
+                estimated_gas = fn.estimate_gas({"from": sender})
+                gas_limit = max(estimated_gas * 2, estimated_gas + 100_000)
+
+                private_key = _hospital_private_key() if org == "org1" else None
+                if private_key:
+                    nonce = w3.eth.get_transaction_count(sender, "pending")
+                    transaction = fn.build_transaction({
+                        "from": sender, "nonce": nonce, "gas": gas_limit,
+                        "chainId": w3.eth.chain_id, "gasPrice": w3.eth.gas_price,
+                    })
+                    signed = w3.eth.account.sign_transaction(
+                        transaction, private_key=private_key,
+                    )
+                    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                else:
+                    tx_hash = fn.transact({"from": sender, "gas": gas_limit})
+
+                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                if receipt.status != 1:
+                    raise RuntimeError(f"transaction reverted: {Web3.to_hex(tx_hash)}")
+                return receipt
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except HTTPException:
         raise
     except Exception as exc:
         raise _http_error(method, exc) from exc
-
 
 def _call(method: str, args: list[Any], org: str):
     try:
@@ -244,12 +415,12 @@ def health() -> dict[str, Any]:
     data = _deployment()
     return {
         "connected": w3.is_connected(),
-        "network": "Ganache",
+        "network": data.get("network", "Ethereum"),
         "chainId": w3.eth.chain_id,
         "blockNumber": w3.eth.block_number,
         "contractAddress": data["contractAddress"],
         "hospitalAddress": data["hospitalAddress"],
-        "researcherAddress": data["researcherAddress"],
+        "researcherSigning": "external-eip191",
     }
 
 
@@ -316,8 +487,13 @@ def invoke(function: str, args: list[str], org: str) -> None:
         _send("updateConsent", args[:2], org)
         return
 
-    if function == "RequestAccess":
-        _send("requestAccess", args[:3], org)
+    if function == "RequestAccessSigned":
+        _send(
+            "requestAccessBySig",
+            [args[0], args[1], args[2], Web3.to_checksum_address(args[3]),
+             bytes.fromhex(args[4].removeprefix("0x"))],
+            "org1",
+        )
         return
 
     if function == "DecideAccess":
@@ -332,6 +508,19 @@ def invoke(function: str, args: list[str], org: str) -> None:
         )
         return
 
+    if function == "ReplaceDatasetCiphertext":
+        _send(
+            "replaceDatasetCiphertext",
+            [args[0], Web3.to_bytes(hexstr=args[1]), Web3.to_bytes(hexstr=args[2]),
+             int(args[3]), int(args[4])],
+            org,
+        )
+        return
+
+    if function == "RecordDatasetMigration":
+        _send("recordDatasetMigration", [args[0], int(args[1]), Web3.to_checksum_address(args[2])], org)
+        return
+
     if function == "RegisterHEJob":
         _send(
             "registerHEJob",
@@ -340,16 +529,29 @@ def invoke(function: str, args: list[str], org: str) -> None:
                 args[1],
                 args[2],
                 args[3],
-                int(args[4]),
+                args[4],
                 args[5],
-                args[6],
+                int(args[6]),
+                _he_locator_commitment(args[7]),
+                args[8],
             ],
             org,
         )
+        _store_he_locator(args[0], "ciphertextCid", args[7])
         return
 
-    if function == "RecordHEComputation":
-        _send("recordHEComputation", args[:3], org)
+    if function == "RecordHEComputationSigned":
+        _send(
+            "recordHEComputationBySig",
+            [
+                args[0],
+                _he_locator_commitment(args[1]),
+                args[2],
+                bytes.fromhex(args[3].removeprefix("0x")),
+            ],
+            "org1",
+        )
+        _store_he_locator(args[0], "resultCid", args[1])
         return
 
     if function == "RecordHEDecryption":
@@ -404,24 +606,55 @@ def query(function: str, args: list[str], org: str = "org2") -> str:
         return json.dumps(locator)
 
     if function == "GetAllDatasets":
+        offset = int(args[0]) if args else 0
+        limit = int(args[1]) if len(args) > 1 else 50
+        if offset < 0 or not 1 <= limit <= 100:
+            raise HTTPException(status_code=400, detail="Invalid pagination")
         return json.dumps([
             _dataset(item)
-            for item in _call("getAllDatasets", [], org)
+            for item in _call("getDatasetPage", [offset, limit], org)
+            if item[10]
         ])
+
+    if function == "DatasetCount":
+        return str(_call("datasetCount", [], org))
+
+    if function == "MigrationSource":
+        return Web3.to_hex(_call("migrationSource", args[:1], org))
 
     if function == "GetDatasetHistory":
         history = []
+        offset = int(args[1]) if len(args) > 1 else 0
+        limit = int(args[2]) if len(args) > 2 else 50
+        if offset < 0 or not 1 <= limit <= 100:
+            raise HTTPException(status_code=400, detail="Invalid pagination")
         for index, row in enumerate(
-            _call("getDatasetHistory", args[:1], org)
+            _call("getDatasetHistoryPage", [args[0], offset, limit], org)
         ):
             value = _dataset(row)
             history.append({
-                "txId": f"ethereum-history-{index + 1}",
+                "txId": f"ethereum-history-{offset + index + 1}",
                 "timestamp": value["updatedAt"],
                 "isDelete": False,
                 "value": value,
             })
         return json.dumps(history)
+
+    if function == "ResearcherRequestDigest":
+        value = _call(
+            "researcherRequestDigest",
+            args[:3],
+            org,
+        )
+        return Web3.to_hex(value)
+
+    if function == "HEComputeDigest":
+        value = _call(
+            "heComputeDigest",
+            args[:1],
+            org,
+        )
+        return Web3.to_hex(value)
 
     if function == "ReadAccessRequest":
         return json.dumps(
@@ -433,12 +666,16 @@ def query(function: str, args: list[str], org: str = "org2") -> str:
 
     if function == "GetAccessHistory":
         history = []
+        offset = int(args[1]) if len(args) > 1 else 0
+        limit = int(args[2]) if len(args) > 2 else 50
+        if offset < 0 or not 1 <= limit <= 100:
+            raise HTTPException(status_code=400, detail="Invalid pagination")
         for index, row in enumerate(
-            _call("getAccessHistory", args[:1], org)
+            _call("getAccessHistoryPage", [args[0], offset, limit], org)
         ):
             value = _request(row)
             history.append({
-                "txId": f"ethereum-history-{index + 1}",
+                "txId": f"ethereum-history-{offset + index + 1}",
                 "timestamp": value["decidedAt"] or value["requestedAt"],
                 "isDelete": False,
                 "value": value,
@@ -465,21 +702,25 @@ def query(function: str, args: list[str], org: str = "org2") -> str:
         )
 
     if function == "ReadHEJob":
-        return json.dumps(_he_job(_call("getHEJob", args[:1], org)))
+        return json.dumps(_he_job(_call("getHEJob", args[:1], org), org))
 
     if function == "GetHEJobHistory":
         history = []
+        offset = int(args[1]) if len(args) > 1 else 0
+        limit = int(args[2]) if len(args) > 2 else 50
+        if offset < 0 or not 1 <= limit <= 100:
+            raise HTTPException(status_code=400, detail="Invalid pagination")
         for index, row in enumerate(
-            _call("getHEJobHistory", args[:1], org)
+            _call("getHEJobHistoryPage", [args[0], offset, limit], org)
         ):
-            value = _he_job(row)
+            value = _he_job(row, org, historical=True)
             timestamp = (
                 value["decryptedAt"]
                 or value["computedAt"]
                 or value["createdAt"]
             )
             history.append({
-                "txId": f"ethereum-history-{index + 1}",
+                "txId": f"ethereum-history-{offset + index + 1}",
                 "timestamp": timestamp,
                 "isDelete": False,
                 "value": value,

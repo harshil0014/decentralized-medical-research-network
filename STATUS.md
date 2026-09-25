@@ -1,38 +1,15 @@
-# Build status — Ethereum / Solidity / Ganache migration
+# Prototype status
 
-## Active implementation
+The decentralized demo uses four Besu QBFT validators and three connected IPFS/Kubo peers. Ganache remains a faster Solidity and FastAPI compatibility test environment. Hospital governance, consent, researcher decisions, and final HE decryption stay under Hospital control.
 
-- Ethereum-compatible local ledger: Ganache
-- Solidity governance contract
-- 100 test ETH per local Ganache account
-- Hospital = local account 0
-- Researcher = local account 1
-- FastAPI service-token roles preserved
-- AES-256-GCM encrypted datasets preserved
-- IPFS encrypted storage preserved
-- Microsoft SEAL CKKS Average preserved
-- Microsoft SEAL CKKS SUM preserved
-- DICOM utilities preserved
+Researchers authenticate with individual API tokens bound to their own external Ethereum wallet addresses. MetaMask/EIP-1193 signs EIP-191 digests for access requests and CSV/DICOM HE computations. The backend relays transactions with the Hospital gas account and never holds researcher private keys. Solidity verifies signers, action-specific chain/contract/request/job digests, and canonical ECDSA signatures.
 
-## Fabric replacement
+Medical data is stored only as AES-256-GCM MEDAES ciphertext in IPFS. Ethereum stores opaque IDs, public data categories, commitments, and hashed HE descriptors. Legacy plaintext IPFS reads are rejected. CT/MR visual-PHI uploads require fail-closed attestation, DICOM headers are de-identified under PS3.15 2024b rules, and DICOM SEG requires dual authorization.
 
-The active backend no longer invokes Fabric peer CLI commands. Existing API endpoints call `backend.ethereum_ledger`, which translates the previous governance operations into Solidity transactions and queries.
+Recovery uses a chain-bound authenticated bundle for wrapped AES keys, private CID/SHA locators and the encrypted-object backup manifest. MEDAES object backups live in a separate configured directory. Restore verifies object SHA, CID and ledger commitment and republishes missing ciphertext to the replicated IPFS layer.
 
-Because Ethereum does not provide Fabric implicit private collections, the encrypted object's CID and SHA-256 are kept in a Hospital-local private metadata store. Solidity stores only a cryptographic commitment to that locator.
+Hospital key-compromise remediation replaces the active encrypted object under a fresh key generation, with a staged backup, on-chain commitment update, retry journal and old-pin retirement. Deliberate recovery migration to another contract verifies the named source deployment and records destination provenance; ordinary restore remains chain-bound.
 
-## Automated validation
+`scripts/setup_decentralized_demo.sh` starts or restarts the demo network. `scripts/status_decentralized_demo.sh` verifies node identities and shared state; `scripts/test_decentralized_topology.py` tests validator and IPFS outages plus full stop/restart persistence. `scripts/stop_decentralized_demo.sh` stops containers while retaining mounted node data.
 
-`.github/workflows/ethereum-e2e.yml` runs:
-
-1. Ganache boot with 100 test ETH/account
-2. Solidity compile
-3. contract deployment
-4. Solidity contract E2E
-5. Python Ethereum adapter E2E
-6. local IPFS
-7. Microsoft SEAL 4.4 build
-8. project HE binary build
-9. DICOM regression
-10. full FastAPI + Ganache + IPFS + AES + HE Average/SUM E2E
-
-See the latest workflow run on the migration branch for the authoritative PASS/FAIL result.
+This is a controlled research prototype, not a clinical compliance or production key-management system. Only synthetic or properly de-identified data should be used.

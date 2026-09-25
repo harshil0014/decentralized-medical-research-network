@@ -85,9 +85,7 @@ int main()
 
     cout << fixed << setprecision(12);
 
-    cout << "Decrypted result:  "
-         << result
-         << " mg/dL\n";
+    cout << "Decrypted result:  " << result << "\n";
 
     cout << "HOSPITAL DECRYPTION: PASS\n";
     return 0;

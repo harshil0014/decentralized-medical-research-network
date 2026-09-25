@@ -1,9 +1,10 @@
-name: Ethereum Solidity Ganache E2E
+name: Medical research full E2E
 
 on:
   push:
     branches:
       - main
+      - dicom-he-v1
   pull_request:
     branches:
       - main
@@ -14,13 +15,13 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: "20"
+          node-version: "24"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -28,7 +29,7 @@ jobs:
         run: |
           python -m venv backend/.venv
           backend/.venv/bin/pip install --upgrade pip
-          backend/.venv/bin/pip install -r requirements.txt
+          backend/.venv/bin/pip install -r requirements.lock
 
       - name: Start Ganache, compile, deploy, contract test
         run: |
@@ -36,7 +37,16 @@ jobs:
           ./scripts/setup_ethereum_local.sh
 
       - name: Test Python Ethereum adapter
-        run: backend/.venv/bin/python scripts/test_ethereum_adapter.py
+        run: |
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_ethereum_error_mapping.py
+          backend/.venv/bin/python scripts/test_ethereum_adapter.py
+
+      - name: Check frontend scripts
+        run: |
+          node --check frontend/app.js
+          node --check frontend/preview.js
+          node ethereum/scripts/test-frontend-wallet.mjs
+          node ethereum/scripts/test-qbft-authority.mjs
 
       - name: Start IPFS
         run: |
@@ -44,7 +54,7 @@ jobs:
             --user 0 \
             -p 127.0.0.1:5001:5001 \
             --entrypoint sh \
-            ipfs/kubo:latest \
+            ipfs/kubo@sha256:b293923d66e490e70ced64df42ea7a6cf7eac2740e3fb29101df18070fa7be48 \
             -c 'export IPFS_PATH=/data/ipfs; mkdir -p "$IPFS_PATH"; ipfs init; ipfs config Addresses.API /ip4/0.0.0.0/tcp/5001; exec ipfs daemon --offline'
           for i in $(seq 1 180); do
             if docker logs medical-ipfs 2>&1 | grep -q "Daemon is ready"; then
@@ -59,6 +69,7 @@ jobs:
       - name: Install Microsoft SEAL 4.4
         run: |
           git clone --depth 1 --branch v4.4.0 https://github.com/microsoft/SEAL.git /tmp/SEAL
+          test "$(git -C /tmp/SEAL rev-parse HEAD)" = 04d53b99ce745efc26bb4965be609b9894755227
           cmake -S /tmp/SEAL -B /tmp/SEAL/build -DSEAL_BUILD_EXAMPLES=OFF -DSEAL_BUILD_TESTS=OFF
           cmake --build /tmp/SEAL/build -j2
           sudo cmake --install /tmp/SEAL/build
@@ -72,11 +83,45 @@ jobs:
           test -x seal_demo/build/hospital_decrypt
           test -x seal_demo/build/researcher_sum
           test -x seal_demo/build/hospital_decrypt_sum
+          test -x seal_demo/build/dicom_hospital_encrypt_stats
+          test -x seal_demo/build/dicom_researcher_compute_stats
+          test -x seal_demo/build/dicom_hospital_decrypt_stats
+          test -x seal_demo/build/dicom_hospital_encrypt_raw
+          test -x seal_demo/build/dicom_researcher_compute_raw
 
       - name: DICOM regression
         run: |
-          backend/.venv/bin/python scripts/test_dicom_series.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_auth_lifecycle.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_job_locks.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_staging_capacity.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_he_csv_scale.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_he_numeric_ranges.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_dicom_series.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_dicom_he_stats.py
 
       - name: Full backend end-to-end
         run: |
           backend/.venv/bin/python scripts/test_ethereum_backend_e2e.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_dicom_he_backend_e2e.py
+
+  decentralized-demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Install RPC adapter dependencies
+        run: python -m pip install -r requirements.lock
+      - name: Start four-validator Besu and three-peer IPFS network
+        run: bash scripts/setup_decentralized_demo.sh
+      - name: Verify distinct nodes, shared state and outage recovery
+        run: PYTHONPATH=. python scripts/test_decentralized_topology.py
+      - name: Verify persisted demo startup
+        run: |
+          bash scripts/setup_decentralized_demo.sh
+          bash scripts/status_decentralized_demo.sh
