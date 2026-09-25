@@ -259,9 +259,11 @@ Dataset AES keys are not stored as raw 32-byte files. Each key generation is wra
 
 Dataset key rotation creates a new active AES key generation for future encrypted objects while retaining historical generations as DECRYPT_ONLY so existing immutable IPFS ciphertext remains readable. It is **version rotation**, not retroactive re-encryption. For a suspected compromised key, the Hospital uses `POST /datasets/{dataset_id}/remediate-key`: it decrypts only in RAM, re-encrypts under a fresh generation, verifies the replicated MEDAES object, stages its encrypted backup, atomically updates the on-chain commitment and key audit, refreshes recovery, then unpins the old object. A journal lets the Hospital retry an interrupted finalization. Copies of old ciphertext or a key already obtained by an adversary cannot be clawed back.
 
-## DICOM analysis semantics
+## CSV HE cohort limit
 
 The CSV HE demo accepts 2–1000 numeric values for one selected metric. The 1000-row synthetic boundary is covered by CI; larger cohorts require a different batching design and are rejected explicitly.
+
+## DICOM analysis semantics
 
 Classic CT/MR slices are ordered by their patient-space plane normal. Inconsistent orientation or overlapping planes are rejected. Physical voxel volume is reported only when slice positions prove regular spacing; `TOTAL_ENERGY` requires that spacing. SEG analysis requires matching source references, frame of reference, orientation, matrix geometry and complete plane coverage. Independently uploaded source and SEG objects use the Hospital master key to create consistent pseudonymous UIDs.
 
