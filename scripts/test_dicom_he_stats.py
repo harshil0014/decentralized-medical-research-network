@@ -727,6 +727,42 @@ def test_raw_above_old_ceiling() -> None:
     print("RAW VOXELS ABOVE 262144: PASS")
 
 
+def test_ckks_result_quality_ranges() -> None:
+    cases = {
+        "positive": np.array([1.5, 2.0, 3.0, 4.5], dtype=np.float64),
+        "negative": np.array([-4.5, -3.0, -2.0, -1.5], dtype=np.float64),
+        "small": np.array([0.001, 0.002, 0.003, 0.004], dtype=np.float64),
+        "large": np.array([100_000.0, 100_010.0, 100_020.0, 100_030.0], dtype=np.float64),
+    }
+    metadata = {
+        "modality": "MR", "unit": "relative_intensity", "scope": "WHOLE_VOLUME",
+        "slice_index": None, "roi_box": None, "original_shape": [1, 2, 2],
+        "selected_shape": [1, 2, 2], "voxel_count": 4,
+        "dicom_loader": "synthetic", "voxel_spacing_mm": None,
+        "voxel_volume_mm3": None, "physical_volume_valid": False,
+    }
+    for label, values in cases.items():
+        for analysis, expected in (
+            ("MEAN", float(values.mean())),
+            ("STANDARD_DEVIATION", float(values.std())),
+        ):
+            job_id = None
+            try:
+                created = create_encrypted_dicom_job(values, analysis, metadata, "RAW_VOXELS")
+                job_id = created["job_id"]
+                compute_encrypted_dicom_analysis(job_id)
+                result = decrypt_dicom_analysis(job_id)
+                assert result["ckks_approximate"] is True
+                assert "no fixed error bound" in result["accuracy_note"]
+                assert math.isfinite(result["value"])
+                tolerance = max(2e-4, abs(expected) * 1e-4)
+                assert abs(result["value"] - expected) <= tolerance, (label, analysis, result, expected)
+            finally:
+                if job_id:
+                    cleanup_dicom_he_job(job_id)
+    print("CKKS POSITIVE/NEGATIVE/SMALL/LARGE RESULT QUALITY: PASS")
+
+
 def main() -> None:
     test_oblique_geometry_and_spacing()
     test_ct_series()
@@ -737,6 +773,7 @@ def main() -> None:
     test_seg_geometry_fail_closed()
     test_raw_multichunk_and_block_fallback()
     test_raw_above_old_ceiling()
+    test_ckks_result_quality_ranges()
     print("DICOM HE STATISTICS: PASS")
 
 

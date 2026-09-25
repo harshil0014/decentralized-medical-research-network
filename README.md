@@ -261,6 +261,8 @@ Dataset key rotation creates a new active AES key generation for future encrypte
 
 ## DICOM analysis semantics
 
+The CSV HE demo accepts 2–1000 numeric values for one selected metric. The 1000-row synthetic boundary is covered by CI; larger cohorts require a different batching design and are rejected explicitly.
+
 Classic CT/MR slices are ordered by their patient-space plane normal. Inconsistent orientation or overlapping planes are rejected. Physical voxel volume is reported only when slice positions prove regular spacing; `TOTAL_ENERGY` requires that spacing. SEG analysis requires matching source references, frame of reference, orientation, matrix geometry and complete plane coverage. Independently uploaded source and SEG objects use the Hospital master key to create consistent pseudonymous UIDs.
 
 `RAW_VOXELS` encrypts selected voxel values before researcher computation. It streams CKKS ciphertext chunks and checks free RAM-backed workspace capacity before encryption. `BLOCK_STATS` has the Hospital compute plaintext sums and squared sums, then encrypts those sufficient statistics; higher moments require `RAW_VOXELS`. Both modes return approximate CKKS results without a fixed error guarantee. Pixel identifiers are addressed by explicit Hospital visual review, separate from automated DICOM header de-identification. No automated pixel-PHI detector is claimed.

@@ -90,6 +90,7 @@ jobs:
           PYTHONPATH=. backend/.venv/bin/python scripts/test_auth_lifecycle.py
           PYTHONPATH=. backend/.venv/bin/python scripts/test_job_locks.py
           PYTHONPATH=. backend/.venv/bin/python scripts/test_staging_capacity.py
+          PYTHONPATH=. backend/.venv/bin/python scripts/test_he_csv_scale.py
           PYTHONPATH=. backend/.venv/bin/python scripts/test_dicom_series.py
           PYTHONPATH=. backend/.venv/bin/python scripts/test_dicom_he_stats.py
 
