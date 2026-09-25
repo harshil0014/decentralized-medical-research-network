@@ -710,11 +710,14 @@ def _normalization_scale(values: np.ndarray) -> float:
     max_abs = float(np.max(np.abs(values)))
     if not math.isfinite(max_abs):
         raise ValueError("DICOM values contain non-finite numbers")
-    if max_abs <= 1.0:
+    if max_abs == 0.0:
         return 1.0
 
     exponent = math.ceil(math.log2(max_abs))
-    return float(2 ** exponent)
+    scale = float(2 ** exponent)
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError("DICOM value range cannot be normalized for CKKS")
+    return scale
 
 
 def build_block_statistics(
