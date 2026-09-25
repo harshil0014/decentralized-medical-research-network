@@ -54,6 +54,8 @@ Dataset and access-request identifiers written to Ethereum are server-generated 
 
 ## Decentralized demo setup
 
+For the complete operator sequence from network startup through wallet signatures, DICOM SEG, outages, recovery, remediation, and restart, see [the demo walkthrough](docs/DEMO_WALKTHROUGH.md).
+
 Requirements:
 
 - Ubuntu / WSL2
